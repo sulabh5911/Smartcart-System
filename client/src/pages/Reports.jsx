@@ -247,7 +247,9 @@ export default function Reports() {
           <div className="text-xl font-black text-slate-900 mt-1">
             ₹ {summary.totalMoneyCollected.toFixed(2)}
           </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">Incl. 5% GST (₹{summary.taxAmount.toFixed(2)})</div>
+          <div className="text-[11px] text-slate-400 mt-0.5">
+            Historical taxes, if applicable: ₹{summary.taxAmount.toFixed(2)}
+          </div>
         </div>
       </div>
 

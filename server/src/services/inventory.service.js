@@ -2,10 +2,13 @@ import mongoose from 'mongoose';
 import { Product } from '../models/Product.js';
 import { Batch } from '../models/Batch.js';
 import { Category } from '../models/Category.js';
+import { Supplier } from '../models/Supplier.js';
+import { Purchase } from '../models/Purchase.js';
 import { StockMovement } from '../models/StockMovement.js';
 import { stockMovementRepository } from '../repositories/stockMovement.repository.js';
 import { productRepository } from '../repositories/product.repository.js';
 import { ApiError } from '../utils/ApiError.js';
+import { supplierProvidesProduct } from '../utils/supplierRelations.js';
 
 /**
  * Inventory Service
@@ -137,15 +140,72 @@ export class InventoryService {
     const totalPages = Math.ceil(total / limitNum) || 1;
 
     const batches = await Batch.find(batchFilter)
+      .populate('supplier', 'companyName')
       .populate({
         path: 'product',
-        select: 'name sku unit sellingPrice minStockAlert category',
+        select: 'name sku barcode unit sellingPrice minStockAlert category',
         populate: { path: 'category', select: 'name color slug' }
       })
       .sort(sort)
       .skip(skip)
       .limit(limitNum)
       .lean();
+
+    const batchesMissingSupplier = batches.filter(
+      (batch) => !batch.supplier?.companyName && !batch.supplierName && batch.product
+    );
+    if (batchesMissingSupplier.length > 0) {
+      const purchaseMatches = batchesMissingSupplier.flatMap((batch) => [
+        { 'items.batch': batch._id },
+        {
+          items: {
+            $elemMatch: {
+              product: batch.product._id,
+              batchNumber: batch.batchNumber
+            }
+          }
+        }
+      ]);
+      const receipts = await Purchase.find({ $or: purchaseMatches })
+        .select('supplier supplierName items.batch items.product items.batchNumber')
+        .sort({ createdAt: -1 })
+        .lean();
+      const supplierIds = [...new Set(
+        receipts.map((receipt) => receipt.supplier?.toString()).filter(Boolean)
+      )];
+      const suppliers = supplierIds.length
+        ? await Supplier.find({ _id: { $in: supplierIds } }).select('_id companyName').lean()
+        : [];
+      const supplierNamesById = new Map(
+        suppliers.map((supplier) => [supplier._id.toString(), supplier.companyName])
+      );
+      const batchesById = new Map(
+        batchesMissingSupplier.map((batch) => [batch._id.toString(), batch])
+      );
+      const batchesByProductAndNumber = new Map(
+        batchesMissingSupplier.map((batch) => [
+          `${batch.product._id.toString()}|${batch.batchNumber.trim().toUpperCase()}`,
+          batch
+        ])
+      );
+
+      for (const receipt of receipts) {
+        const supplierName =
+          receipt.supplierName || supplierNamesById.get(receipt.supplier?.toString()) || '';
+        if (!supplierName) continue;
+
+        for (const item of receipt.items || []) {
+          const batch =
+            (item.batch && batchesById.get(item.batch.toString())) ||
+            batchesByProductAndNumber.get(
+              `${item.product?.toString()}|${item.batchNumber?.trim().toUpperCase()}`
+            );
+          if (batch && !batch.supplierName && !batch.supplier?.companyName) {
+            batch.supplierName = supplierName;
+          }
+        }
+      }
+    }
 
     // Format days to expiry for clean UI display
     const enrichedBatches = batches.map((b) => {
@@ -179,6 +239,7 @@ export class InventoryService {
    */
   async receiveStock({
     productId,
+    supplierId = null,
     batchNumber,
     purchasePrice,
     mfgDate,
@@ -200,8 +261,22 @@ export class InventoryService {
       throw ApiError.badRequest('Cannot receive stock for an archived product. Please unarchive it first.');
     }
 
-    const qty = parseInt(quantity, 10);
-    if (isNaN(qty) || qty <= 0) {
+    let supplier = null;
+    if (supplierId) {
+      if (!mongoose.Types.ObjectId.isValid(supplierId)) {
+        throw ApiError.badRequest('Invalid supplier ID format');
+      }
+      supplier = await Supplier.findById(supplierId);
+      if (!supplier || supplier.status !== 'Active') {
+        throw ApiError.badRequest('A valid active supplier is required for this stock receipt.');
+      }
+      if (!supplierProvidesProduct(supplier, product)) {
+        throw ApiError.badRequest(`Product "${product.name}" is not linked to supplier "${supplier.companyName}".`);
+      }
+    }
+
+    const qty = Number(quantity);
+    if (!Number.isInteger(qty) || qty <= 0) {
       throw ApiError.badRequest('Received quantity must be a positive integer greater than 0');
     }
 
@@ -210,14 +285,26 @@ export class InventoryService {
       throw ApiError.badRequest('Batch number is required (e.g. B101)');
     }
 
-    const costPrice = parseFloat(purchasePrice);
-    if (isNaN(costPrice) || costPrice < 0) {
+    const costPrice = Number(purchasePrice);
+    if (
+      purchasePrice == null ||
+      (typeof purchasePrice === 'string' && purchasePrice.trim() === '') ||
+      !Number.isFinite(costPrice) ||
+      costPrice < 0
+    ) {
       throw ApiError.badRequest('Purchase price must be a valid non-negative number');
     }
 
     const expDate = new Date(expiryDate);
     if (isNaN(expDate.getTime())) {
       throw ApiError.badRequest('Valid expiry date is required');
+    }
+    const expiryDay = new Date(expDate);
+    expiryDay.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (expiryDay <= today) {
+      throw ApiError.badRequest('Expiry date must be after today');
     }
 
     // Check if batch already exists for this product
@@ -226,12 +313,29 @@ export class InventoryService {
     let newStock = 0;
 
     if (batch) {
+      if (
+        supplier &&
+        batch.supplier &&
+        batch.supplier.toString() !== supplier._id.toString()
+      ) {
+        throw ApiError.conflict(
+          `Batch ${cleanBatchNo} of "${product.name}" is already linked to a different supplier.`
+        );
+      }
       // Existing batch: increment stock
       previousStock = batch.availableQuantity;
       newStock = previousStock + qty;
       batch.availableQuantity = newStock;
       batch.purchasePrice = costPrice; // update cost price if new lot
       batch.expiryDate = expDate;
+      if (supplier) {
+        batch.supplier = supplier._id;
+        batch.supplierName = supplier.companyName;
+      } else if (batch.supplier) {
+        throw ApiError.conflict(
+          `Batch ${cleanBatchNo} of "${product.name}" is already linked to a supplier. Select that supplier to receive more stock.`
+        );
+      }
       if (mfgDate) batch.mfgDate = new Date(mfgDate);
       await batch.save();
     } else {
@@ -240,6 +344,8 @@ export class InventoryService {
       newStock = qty;
       batch = new Batch({
         product: productId,
+        supplier: supplier?._id || null,
+        supplierName: supplier?.companyName || '',
         batchNumber: cleanBatchNo,
         purchasePrice: costPrice,
         mfgDate: mfgDate ? new Date(mfgDate) : new Date(),
@@ -268,7 +374,7 @@ export class InventoryService {
     const populatedBatch = await Batch.findById(batch._id).populate({
       path: 'product',
       select: 'name sku unit sellingPrice status'
-    });
+    }).populate('supplier', 'companyName');
 
     return {
       batch: populatedBatch,
@@ -301,9 +407,9 @@ export class InventoryService {
       throw ApiError.notFound(`Batch with ID ${batchId} not found`);
     }
 
-    const qty = parseInt(quantity, 10);
-    if (isNaN(qty) || qty < 0) {
-      throw ApiError.badRequest('Quantity must be a valid non-negative integer');
+    const qty = Number(quantity);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      throw ApiError.badRequest('Quantity must be a positive integer');
     }
 
     const previousStock = batch.availableQuantity;

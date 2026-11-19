@@ -175,9 +175,9 @@ export class SaleService {
     const discountAmount = Math.round(((computedSubtotal * cleanDiscountPercent) / 100) * 100) / 100;
     const taxableAmount = Math.max(0, Math.round((computedSubtotal - discountAmount) * 100) / 100);
 
-    const standardTaxPercent = 5; // 5% GST Supermarket Standard
-    const taxAmount = Math.round(((taxableAmount * standardTaxPercent) / 100) * 100) / 100;
-    const grandTotal = Math.round((taxableAmount + taxAmount) * 100) / 100;
+    const taxPercent = 0;
+    const taxAmount = 0;
+    const grandTotal = taxableAmount;
 
     const validatedPaymentMethod = ['Cash', 'UPI', 'Card'].includes(paymentMethod)
       ? paymentMethod
@@ -212,70 +212,147 @@ export class SaleService {
         completedDeductions.push(step);
       }
     } catch (concurrencyErr) {
-      // ⚠️ COMPENSATING ROLLBACK: Restore any batch quantities that were deducted prior to failure
+      const rollbackErrors = [];
       for (const rollbackStep of completedDeductions) {
-        await Batch.updateOne(
-          { _id: rollbackStep.batchId },
-          { $inc: { availableQuantity: rollbackStep.deductQty } }
+        try {
+          const result = await Batch.updateOne(
+            { _id: rollbackStep.batchId },
+            { $inc: { availableQuantity: rollbackStep.deductQty } }
+          );
+          if (result.modifiedCount !== 1) {
+            throw new Error(`Could not restore batch ${rollbackStep.batchNumber}.`);
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+
+      if (rollbackErrors.length > 0) {
+        console.error('POS stock deduction rollback was incomplete:', {
+          errors: rollbackErrors.map((error) => error.message)
+        });
+        throw ApiError.internal(
+          'Checkout failed and automatic stock rollback was incomplete. Contact support before retrying.'
         );
       }
       throw ApiError.conflict(concurrencyErr.message || 'Checkout failed due to stock change. Rollback successful.');
     }
 
-    // 9. Create Immutable Stock Movement Audit Logs for Each Deducted Batch
-    for (const step of completedDeductions) {
-      await StockMovement.create({
-        product: step.productId,
-        batch: step.batchId,
-        movementType: 'SALE',
-        quantity: -step.deductQty,
-        previousStock: step.previousStock,
-        newStock: step.previousStock - step.deductQty,
-        reason: `POS sale checkout (Invoice: ${invoiceNumber})`,
-        reference: invoiceNumber,
-        performedBy: cashier
+    let sale;
+    let loyaltyUpdated = false;
+    const createdMovementIds = [];
+    try {
+      // 9. Create stock movement audit logs for each deducted batch.
+      for (const step of completedDeductions) {
+        const movement = await StockMovement.create({
+          product: step.productId,
+          batch: step.batchId,
+          movementType: 'SALE',
+          quantity: -step.deductQty,
+          previousStock: step.previousStock,
+          newStock: step.previousStock - step.deductQty,
+          reason: `POS sale checkout (Invoice: ${invoiceNumber})`,
+          reference: invoiceNumber,
+          performedBy: cashier
+        });
+        createdMovementIds.push(movement._id);
+      }
+
+      // 10. Update Product Status & Recalculate Catalog Stock
+      for (const productIdStr of aggregatedCartMap.keys()) {
+        await inventoryService._updateProductStockStatus(productIdStr);
+      }
+
+      // 11. Update Customer Loyalty & Spending if registered customer.
+      if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
+        await Customer.findByIdAndUpdate(customerId, {
+          $inc: { totalSpent: grandTotal, loyaltyPoints: Math.floor(grandTotal / 100) }
+        });
+        loyaltyUpdated = true;
+      }
+
+      // 12. Create & Persist Authoritative Sale Record.
+      sale = await saleRepository.create({
+        invoiceNumber,
+        idempotencyKey: idempotencyKey?.trim() || undefined,
+        customer: customerId && mongoose.Types.ObjectId.isValid(customerId) ? customerId : null,
+        customerName: customerName.trim() || 'Walk-in Customer',
+        customerPhone: customerPhone.trim() || '---',
+        items: processedSaleItems,
+        itemsCount: Array.from(aggregatedCartMap.values()).reduce((a, b) => a + b, 0),
+        cogs: Math.round(totalCOGS * 100) / 100,
+        subtotal: computedSubtotal,
+        discountPercent: cleanDiscountPercent,
+        discountAmount,
+        taxableAmount,
+        taxPercent,
+        taxAmount,
+        totalAmount: grandTotal,
+        paymentMethod: validatedPaymentMethod,
+        cashier,
+        notes
       });
+
+      return {
+        sale,
+        isDuplicate: false,
+        message: `Invoice ${invoiceNumber} created successfully. Stock deducted via FEFO.`
+      };
+    } catch (checkoutError) {
+      const rollbackErrors = [];
+      const rollback = async (operation) => {
+        try {
+          await operation();
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      };
+
+      if (createdMovementIds.length > 0) {
+        await rollback(() => StockMovement.deleteMany({ _id: { $in: createdMovementIds } }));
+      }
+      if (sale?._id) {
+        await rollback(() => Sale.deleteOne({ _id: sale._id }));
+      }
+      if (loyaltyUpdated && customerId) {
+        await rollback(() =>
+          Customer.findByIdAndUpdate(customerId, {
+            $inc: { totalSpent: -grandTotal, loyaltyPoints: -Math.floor(grandTotal / 100) }
+          })
+        );
+      }
+      for (const step of completedDeductions) {
+        await rollback(() =>
+          Batch.updateOne({ _id: step.batchId }, { $inc: { availableQuantity: step.deductQty } })
+        );
+      }
+      for (const productIdStr of aggregatedCartMap.keys()) {
+        await rollback(() => inventoryService._updateProductStockStatus(productIdStr));
+      }
+
+      if (rollbackErrors.length > 0) {
+        console.error('POS checkout rollback was incomplete:', {
+          invoiceNumber,
+          errors: rollbackErrors.map((error) => error.message)
+        });
+        throw ApiError.internal(
+          'Checkout failed and automatic rollback was incomplete. Contact support before retrying.'
+        );
+      }
+
+      if (checkoutError?.code === 11000 && idempotencyKey) {
+        const duplicateSale = await saleRepository.findByIdempotencyKey(idempotencyKey.trim());
+        if (duplicateSale) {
+          return {
+            sale: duplicateSale,
+            isDuplicate: true,
+            message: `Idempotent response: Returning already processed invoice "${duplicateSale.invoiceNumber}". No duplicate charge.`
+          };
+        }
+      }
+
+      throw checkoutError;
     }
-
-    // 10. Update Product Status & Recalculate Catalog Stock
-    for (const productIdStr of aggregatedCartMap.keys()) {
-      await inventoryService._updateProductStockStatus(productIdStr);
-    }
-
-    // 11. Create & Persist Authoritative Sale Record
-    const sale = await saleRepository.create({
-      invoiceNumber,
-      idempotencyKey: idempotencyKey?.trim() || undefined,
-      customer: customerId && mongoose.Types.ObjectId.isValid(customerId) ? customerId : null,
-      customerName: customerName.trim() || 'Walk-in Customer',
-      customerPhone: customerPhone.trim() || '---',
-      items: processedSaleItems,
-      itemsCount: Array.from(aggregatedCartMap.values()).reduce((a, b) => a + b, 0),
-      cogs: Math.round(totalCOGS * 100) / 100,
-      subtotal: computedSubtotal,
-      discountPercent: cleanDiscountPercent,
-      discountAmount,
-      taxableAmount,
-      taxPercent: standardTaxPercent,
-      taxAmount,
-      totalAmount: grandTotal,
-      paymentMethod: validatedPaymentMethod,
-      cashier,
-      notes
-    });
-
-    // 12. Update Customer Loyalty & Spending if registered customer
-    if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
-      await Customer.findByIdAndUpdate(customerId, {
-        $inc: { totalSpent: grandTotal, loyaltyPoints: Math.floor(grandTotal / 100) }
-      });
-    }
-
-    return {
-      sale,
-      isDuplicate: false,
-      message: `Invoice ${invoiceNumber} created successfully. Stock deducted via FEFO.`
-    };
   }
 
   async getAllSales(query) {

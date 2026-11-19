@@ -76,6 +76,11 @@ const saleSchema = new mongoose.Schema(
           default: 0,
           min: 0
         },
+        refundedAmount: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
         // Audit trail of FEFO batches depleted for this item
         itemCost: {
           type: Number,
@@ -129,7 +134,7 @@ const saleSchema = new mongoose.Schema(
     },
     taxPercent: {
       type: Number,
-      default: 5, // 5% GST standard for supermarket goods
+      default: 0,
       min: 0
     },
     taxAmount: {

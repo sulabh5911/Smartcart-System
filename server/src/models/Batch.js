@@ -19,6 +19,17 @@ const batchSchema = new mongoose.Schema(
       required: [true, 'Product reference is required for every inventory batch'],
       index: true
     },
+    supplier: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Supplier',
+      default: null,
+      index: true
+    },
+    supplierName: {
+      type: String,
+      trim: true,
+      default: ''
+    },
     mfgDate: {
       type: Date,
       default: Date.now

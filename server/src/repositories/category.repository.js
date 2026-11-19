@@ -1,5 +1,4 @@
 import { Category } from '../models/Category.js';
-import { Product } from '../models/Product.js';
 
 /**
  * MongoDB Mongoose Category Repository
@@ -13,8 +12,19 @@ export class CategoryRepository {
       {
         $lookup: {
           from: 'products',
-          localField: '_id',
-          foreignField: 'category',
+          let: { categoryId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$category', '$$categoryId'] },
+                    { $ne: ['$isArchived', true] }
+                  ]
+                }
+              }
+            }
+          ],
           as: 'products'
         }
       },

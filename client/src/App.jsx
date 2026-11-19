@@ -2,7 +2,6 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ToastProvider } from './context/ToastContext';
 import { AuthProvider } from './context/AuthContext';
-import { MockDataProvider } from './context/MockDataContext';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 
@@ -46,8 +45,7 @@ export default function App() {
     <BrowserRouter>
       <ToastProvider>
         <AuthProvider>
-          <MockDataProvider>
-            <Routes>
+          <Routes>
               {/* Public Authentication Route */}
               <Route path="/login" element={<Login />} />
 
@@ -192,8 +190,7 @@ export default function App() {
 
                 <Route path="*" element={<NotFound />} />
               </Route>
-            </Routes>
-          </MockDataProvider>
+          </Routes>
         </AuthProvider>
       </ToastProvider>
     </BrowserRouter>

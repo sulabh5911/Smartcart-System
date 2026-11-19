@@ -2,25 +2,24 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { productService } from '../services/productService';
 import { customerService } from '../services/customerService';
 import { saleService } from '../services/saleService';
+import { getProductImage } from '../utils/productImage';
 import { useToast } from '../context/ToastContext';
 import Modal from '../components/Modal';
+import BarcodeScanner from '../components/BarcodeScanner';
 import { FormField, Input, Button } from '../components/Form';
 import {
   Search,
-  Plus,
-  Minus,
   Trash2,
   Printer,
   Barcode,
   CreditCard,
   Banknote,
   QrCode,
-  UserPlus,
   RefreshCw,
   ShoppingBag,
   Info,
   CheckCircle2,
-  AlertCircle
+  Camera
 } from 'lucide-react';
 
 export default function POSBilling() {
@@ -35,6 +34,15 @@ export default function POSBilling() {
   const [searchTerm, setSearchTerm] = useState('');
   const [barcodeInput, setBarcodeInput] = useState('');
   const barcodeInputRef = useRef(null);
+  const barcodeLookupQueueRef = useRef(Promise.resolve());
+  const barcodeLookupCountRef = useRef(0);
+  const scanBufferRef = useRef('');
+  const lastScanKeyAtRef = useRef(0);
+  const lookupBarcodeRef = useRef(null);
+  const checkoutKeysRef = useRef(new Map());
+  const checkoutInProgressRef = useRef(false);
+  const [barcodeLookupLoading, setBarcodeLookupLoading] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
 
   // Cart state: [{ productId, name, sku, price, quantity, stock, image, unit }]
   const [cart, setCart] = useState([]);
@@ -75,7 +83,7 @@ export default function POSBilling() {
       };
       setSelectedCustomer(walkIn);
     } catch (err) {
-      addToast('Failed to load store catalog or customers', 'error');
+      addToast(err?.response?.data?.message || 'Failed to load store catalog or customers', 'error');
     } finally {
       setLoadingProducts(false);
     }
@@ -83,44 +91,25 @@ export default function POSBilling() {
 
   useEffect(() => {
     loadData();
+    barcodeInputRef.current?.focus();
   }, []);
-
-  // Barcode / Quick scanner handler: when Enter is pressed, auto-add to cart
-  const handleBarcodeKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const code = barcodeInput.trim().toLowerCase();
-      if (!code) return;
-
-      const found = products.find(
-        (p) =>
-          p.sku.toLowerCase() === code ||
-          p.name.toLowerCase().includes(code)
-      );
-
-      if (found) {
-        addToCart(found);
-        setBarcodeInput('');
-      } else {
-        addToast(`No product found matching barcode "${barcodeInput}"`, 'warning');
-      }
-    }
-  };
-
   // Cart operations
   const addToCart = (product) => {
-    if (product.stock <= 0) {
+    const availableStock = Number(product.sellableStock ?? product.stock ?? 0);
+    if (availableStock <= 0) {
       addToast(`"${product.name}" is out of stock!`, 'warning');
+      return;
+    }
+
+    const existingItem = cart.find((item) => item.productId === product._id);
+    if (existingItem && existingItem.quantity + 1 > availableStock) {
+      addToast(`Maximum available stock (${availableStock}) reached for ${product.name}`, 'warning');
       return;
     }
 
     setCart((prev) => {
       const existing = prev.find((item) => item.productId === product._id);
       if (existing) {
-        if (existing.quantity + 1 > product.stock) {
-          addToast(`Maximum available stock (${product.stock}) reached for ${product.name}`, 'warning');
-          return prev;
-        }
         return prev.map((item) =>
           item.productId === product._id ? { ...item, quantity: item.quantity + 1 } : item
         );
@@ -131,17 +120,90 @@ export default function POSBilling() {
           productId: product._id,
           name: product.name,
           sku: product.sku,
+          barcode: product.barcode || '',
           price: product.sellingPrice,
           quantity: 1,
-          stock: product.stock,
+          stock: availableStock,
           unit: product.unit || 'unit',
-          image: product.image || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=120&auto=format&fit=crop&q=80'
+          image: getProductImage(product.image)
         }
       ];
     });
 
     addToast(`Added ${product.name} to cart`, 'info', 1200);
   };
+
+  const lookupBarcode = (value) => {
+    const code = value.trim();
+    if (!code || isSubmitting) return;
+
+    barcodeLookupCountRef.current += 1;
+    setBarcodeLookupLoading(true);
+    const processScan = async () => {
+      try {
+        const response = await productService.getByBarcode(code);
+        addToCart(response.data);
+        setBarcodeInput((current) => (current.trim() === code ? '' : current));
+      } catch (error) {
+        const message = error?.response?.data?.message || 'Barcode lookup failed. Check your connection and retry.';
+        addToast(message, error?.response?.status === 404 ? 'warning' : 'error', 4500);
+      } finally {
+        barcodeLookupCountRef.current -= 1;
+        if (barcodeLookupCountRef.current === 0) setBarcodeLookupLoading(false);
+        if (barcodeInputRef.current) barcodeInputRef.current.focus();
+      }
+    };
+
+    barcodeLookupQueueRef.current = barcodeLookupQueueRef.current.then(processScan, processScan);
+    return barcodeLookupQueueRef.current;
+  };
+
+  useEffect(() => {
+    lookupBarcodeRef.current = lookupBarcode;
+  });
+  const handleBarcodeKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      lookupBarcode(barcodeInput);
+    }
+  };
+
+  useEffect(() => {
+    const handleUsbScannerInput = (event) => {
+      if (
+        event.target === barcodeInputRef.current ||
+        event.target?.matches?.('input, textarea, select, [contenteditable="true"]') ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        isCameraOpen ||
+        isCustomerModalOpen ||
+        isReceiptOpen
+      ) {
+        return;
+      }
+
+      const now = Date.now();
+      if (event.key === 'Enter') {
+        const code = scanBufferRef.current;
+        scanBufferRef.current = '';
+        if (code.length >= 4 && now - lastScanKeyAtRef.current < 1500) {
+          event.preventDefault();
+          lookupBarcodeRef.current?.(code);
+        }
+        return;
+      }
+
+      if (event.key.length === 1 && /^[\x20-\x7E]$/.test(event.key)) {
+        if (now - lastScanKeyAtRef.current > 100) scanBufferRef.current = '';
+        scanBufferRef.current += event.key;
+        lastScanKeyAtRef.current = now;
+      }
+    };
+
+    window.addEventListener('keydown', handleUsbScannerInput);
+    return () => window.removeEventListener('keydown', handleUsbScannerInput);
+  }, [isCameraOpen, isCustomerModalOpen, isReceiptOpen]);
 
   const updateQty = (productId, delta) => {
     setCart((prev) =>
@@ -191,8 +253,7 @@ export default function POSBilling() {
   const subtotal = cart.reduce((acc, item) => acc + item.price * item.quantity, 0);
   const discountAmount = Math.round(((subtotal * discountPercent) / 100) * 100) / 100;
   const taxable = Math.max(0, Math.round((subtotal - discountAmount) * 100) / 100);
-  const taxAmount = Math.round(((taxable * 5) / 100) * 100) / 100; // 5% GST
-  const grandTotal = Math.round((taxable + taxAmount) * 100) / 100;
+  const grandTotal = taxable;
 
   // Quick Customer Creation
   const handleCreateCustomer = async (e) => {
@@ -222,15 +283,18 @@ export default function POSBilling() {
 
   // Checkout with Server Authoritative Calculation & Idempotency Key
   const handleGenerateBill = async () => {
+    if (checkoutInProgressRef.current) return;
     if (cart.length === 0) {
       addToast('Cart is empty. Please add products first.', 'warning');
       return;
     }
+    if (barcodeLookupCountRef.current > 0) {
+      addToast('Wait for barcode lookups to finish before checking out.', 'warning');
+      return;
+    }
 
+    checkoutInProgressRef.current = true;
     setIsSubmitting(true);
-    // Unique Client Idempotency Key
-    const idempotencyKey = `POS-BILL-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-
     try {
       const payload = {
         customerId: selectedCustomer?._id || selectedCustomer?.id || null,
@@ -243,9 +307,15 @@ export default function POSBilling() {
         discountPercent,
         paymentMethod,
         cashier: 'Counter-01',
-        idempotencyKey,
         notes: `POS transaction tender: ${paymentMethod}`
       };
+      const requestFingerprint = JSON.stringify(payload);
+      let idempotencyKey = checkoutKeysRef.current.get(requestFingerprint);
+      if (!idempotencyKey) {
+        idempotencyKey = `POS-BILL-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+        checkoutKeysRef.current.set(requestFingerprint, idempotencyKey);
+      }
+      payload.idempotencyKey = idempotencyKey;
 
       const res = await saleService.checkout(payload);
       const saleRecord = res.data?.sale || res.data;
@@ -253,6 +323,7 @@ export default function POSBilling() {
       setCompletedSale(saleRecord);
       setIsReceiptOpen(true);
       setCart([]);
+      checkoutKeysRef.current.clear();
       addToast(`Invoice ${saleRecord.invoiceNumber} generated successfully!`, 'success');
 
       // Refresh product stock in catalog
@@ -261,6 +332,7 @@ export default function POSBilling() {
       const errorMsg = err?.response?.data?.message || 'Checkout failed. Please check stock levels.';
       addToast(errorMsg, 'error', 5000);
     } finally {
+      checkoutInProgressRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -273,6 +345,7 @@ export default function POSBilling() {
       (p) =>
         p.name.toLowerCase().includes(q) ||
         p.sku.toLowerCase().includes(q) ||
+        p.barcode?.toLowerCase().includes(q) ||
         (p.category?.name && p.category.name.toLowerCase().includes(q))
     );
   }, [products, searchTerm]);
@@ -309,17 +382,31 @@ export default function POSBilling() {
           {/* Dual Input: Barcode Scanner & Search */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {/* Barcode scanner input */}
-            <div className="relative">
-              <Barcode className="w-4 h-4 text-emerald-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                ref={barcodeInputRef}
-                type="text"
-                value={barcodeInput}
-                onChange={(e) => setBarcodeInput(e.target.value)}
-                onKeyDown={handleBarcodeKeyDown}
-                placeholder="Scan / Type Barcode + Enter..."
-                className="w-full pl-9 pr-3 py-2 bg-emerald-50/50 border border-emerald-200 rounded-lg text-xs font-mono text-slate-900 placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:bg-white"
-              />
+            <div className="flex min-w-0 gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Barcode className="w-4 h-4 text-emerald-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  ref={barcodeInputRef}
+                  type="text"
+                  value={barcodeInput}
+                  onChange={(e) => setBarcodeInput(e.target.value)}
+                  onKeyDown={handleBarcodeKeyDown}
+                  disabled={isSubmitting}
+                  aria-label="USB barcode scanner input"
+                  placeholder={barcodeLookupLoading ? 'Looking up barcode…' : 'Scan / Type Barcode + Enter...'}
+                  className="w-full pl-9 pr-3 py-2 bg-emerald-50/50 border border-emerald-200 rounded-lg text-xs font-mono text-slate-900 placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:bg-white"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCameraOpen(true)}
+                disabled={isSubmitting}
+                className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                aria-label="Open camera barcode scanner"
+              >
+                <Camera className="h-4 w-4" />
+                <span className="hidden sm:inline">Scan Barcode</span>
+              </button>
             </div>
 
             {/* Keyword search input */}
@@ -340,7 +427,6 @@ export default function POSBilling() {
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 text-[11px] font-semibold text-slate-500 uppercase border-b border-slate-200 sticky top-0 z-10">
                 <tr>
-                  <th className="py-2.5 px-3 w-12">Item</th>
                   <th className="py-2.5 px-3">Product Name</th>
                   <th className="py-2.5 px-3">SKU</th>
                   <th className="py-2.5 px-3">Price</th>
@@ -351,35 +437,27 @@ export default function POSBilling() {
               <tbody className="divide-y divide-slate-100">
                 {loadingProducts ? (
                   <tr>
-                    <td colSpan="6" className="py-12 text-center text-slate-400">
+                    <td colSpan="5" className="py-12 text-center text-slate-400">
                       <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-blue-500" />
                       Loading catalog from MongoDB...
                     </td>
                   </tr>
                 ) : filteredProducts.length === 0 ? (
                   <tr>
-                    <td colSpan="6" className="py-12 text-center text-slate-400">
+                    <td colSpan="5" className="py-12 text-center text-slate-400">
                       No matching products found.
                     </td>
                   </tr>
                 ) : (
                   filteredProducts.map((p) => {
-                    const isOut = p.stock <= 0;
+                    const availableStock = Number(p.sellableStock ?? p.stock ?? 0);
+                    const isOut = availableStock <= 0;
                     return (
                       <tr key={p._id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="py-2 px-3">
-                          <img
-                            src={p.image || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=120&auto=format&fit=crop&q=80'}
-                            alt={p.name}
-                            className="w-9 h-9 object-cover rounded-lg border border-slate-200 shrink-0"
-                            onError={(e) => {
-                              e.target.src = 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=120&auto=format&fit=crop&q=80';
-                            }}
-                          />
-                        </td>
-                        <td className="py-2 px-3">
                           <div className="font-semibold text-slate-900 leading-tight">{p.name}</div>
                           <div className="text-[10px] text-slate-400">{p.category?.name || 'General'}</div>
+                          {p.barcode && <div className="text-[10px] text-slate-400 font-mono">{p.barcode}</div>}
                         </td>
                         <td className="py-2 px-3 font-mono text-[11px] text-slate-500">{p.sku}</td>
                         <td className="py-2 px-3 text-slate-800 font-semibold whitespace-nowrap">
@@ -395,7 +473,7 @@ export default function POSBilling() {
                                 : 'bg-emerald-100 text-emerald-700'
                             }`}
                           >
-                            {p.stock} {p.unit}
+                            {availableStock} {p.unit}
                           </span>
                         </td>
                         <td className="py-2 px-3 text-center">
@@ -469,6 +547,7 @@ export default function POSBilling() {
                             {item.name}
                           </div>
                           <div className="text-[10px] text-slate-400 font-mono">{item.sku}</div>
+                          {item.barcode && <div className="text-[10px] text-slate-400 font-mono">{item.barcode}</div>}
                         </td>
                         <td className="py-2 px-2 text-slate-600">₹ {item.price.toFixed(2)}</td>
                         <td className="py-2 px-2 text-center">
@@ -573,11 +652,6 @@ export default function POSBilling() {
                 <span className="font-semibold text-rose-500">- ₹ {discountAmount.toFixed(2)}</span>
               </div>
 
-              <div className="flex justify-between text-slate-600">
-                <span>GST Tax (5%)</span>
-                <span className="font-semibold text-slate-800">+ ₹ {taxAmount.toFixed(2)}</span>
-              </div>
-
               <div className="pt-2 border-t border-slate-200 flex justify-between items-baseline">
                 <span className="text-sm font-bold text-slate-900">Total Payable</span>
                 <span className="text-2xl font-black text-slate-900">
@@ -628,9 +702,9 @@ export default function POSBilling() {
 
             <button
               onClick={handleGenerateBill}
-              disabled={isSubmitting || cart.length === 0}
+              disabled={isSubmitting || cart.length === 0 || barcodeLookupLoading}
               className={`w-full py-3 rounded-lg text-xs font-bold text-white shadow-sm flex items-center justify-center gap-2 transition-colors ${
-                isSubmitting || cart.length === 0
+                isSubmitting || cart.length === 0 || barcodeLookupLoading
                   ? 'bg-slate-400 cursor-not-allowed'
                   : 'bg-emerald-600 hover:bg-emerald-700'
               }`}
@@ -652,6 +726,12 @@ export default function POSBilling() {
       </div>
 
       {/* Quick Add Customer Modal */}
+      <BarcodeScanner
+        isOpen={isCameraOpen}
+        onClose={() => setIsCameraOpen(false)}
+        onScan={(code) => lookupBarcodeRef.current?.(code)}
+      />
+
       <Modal
         isOpen={isCustomerModalOpen}
         onClose={() => setIsCustomerModalOpen(false)}
@@ -784,11 +864,6 @@ export default function POSBilling() {
                   <span>- ₹{completedSale.discountAmount?.toFixed(2)}</span>
                 </div>
               )}
-              <div className="flex justify-between">
-                <span>GST Tax (5%):</span>
-                <span>+ ₹{completedSale.taxAmount?.toFixed(2)}</span>
-              </div>
-
               <div className="pt-2 border-t border-slate-900 flex justify-between items-baseline text-slate-900">
                 <span className="font-bold text-sm">GRAND TOTAL:</span>
                 <span className="font-black text-lg">₹{completedSale.totalAmount?.toFixed(2)}</span>

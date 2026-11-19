@@ -7,6 +7,7 @@ import { StockMovement } from '../models/StockMovement.js';
 import { purchaseRepository } from '../repositories/purchase.repository.js';
 import { inventoryService } from './inventory.service.js';
 import { ApiError } from '../utils/ApiError.js';
+import { supplierProvidesProduct } from '../utils/supplierRelations.js';
 
 export class PurchaseService {
   /**
@@ -30,6 +31,13 @@ export class PurchaseService {
     notes = '',
     idempotencyKey = null
   }) {
+    if (idempotencyKey != null && typeof idempotencyKey !== 'string') {
+      throw ApiError.badRequest('Idempotency key must be a string.');
+    }
+    if (typeof invoiceReference !== 'string') {
+      throw ApiError.badRequest('Supplier invoice reference must be a string.');
+    }
+
     // 1. Idempotency Check (Duplicate receipt protection)
     if (idempotencyKey && idempotencyKey.trim() !== '') {
       const existingPO = await purchaseRepository.findByIdempotencyKey(idempotencyKey.trim());
@@ -55,10 +63,17 @@ export class PurchaseService {
     if (!resolvedSupplier) {
       throw ApiError.badRequest('A valid registered supplier is required for inward stock receipts.');
     }
+    if (resolvedSupplier.status !== 'Active') {
+      throw ApiError.badRequest('Cannot receive stock from an inactive supplier.');
+    }
 
     // 3. Validate Items Array
     if (!Array.isArray(items) || items.length === 0) {
       throw ApiError.badRequest('At least one product line item is required for a purchase receipt.');
+    }
+
+    if (!['Paid', 'Pending', 'Partial'].includes(paymentStatus)) {
+      throw ApiError.badRequest('Payment status must be Paid, Pending, or Partial.');
     }
 
     // Generate PO Number
@@ -73,6 +88,9 @@ export class PurchaseService {
 
     try {
       for (const item of items) {
+        if (!item || typeof item !== 'object') {
+          throw ApiError.badRequest('Each purchase item must be an object.');
+        }
         const pid = item.productId || item.product;
         if (!pid || !mongoose.Types.ObjectId.isValid(pid)) {
           throw ApiError.badRequest(`Invalid or missing product ID in purchase item.`);
@@ -85,18 +103,29 @@ export class PurchaseService {
         if (product.isArchived) {
           throw ApiError.badRequest(`Cannot receive stock for archived product "${product.name}".`);
         }
+        if (!supplierProvidesProduct(resolvedSupplier, product)) {
+          throw ApiError.badRequest(
+            `Product "${product.name}" is not linked to supplier "${resolvedSupplier.companyName}".`
+          );
+        }
 
-        const qty = parseInt(item.quantity, 10);
-        if (isNaN(qty) || qty <= 0) {
+        const qty = Number(item.quantity);
+        if (!Number.isInteger(qty) || qty <= 0) {
           throw ApiError.badRequest(`Received quantity for "${product.name}" must be an integer greater than 0.`);
         }
 
-        const purchasePrice = parseFloat(item.purchasePrice);
-        if (isNaN(purchasePrice) || purchasePrice < 0) {
+        const purchasePrice = Number(item.purchasePrice);
+        if (
+          item.purchasePrice == null ||
+          (typeof item.purchasePrice === 'string' && item.purchasePrice.trim() === '') ||
+          !['number', 'string'].includes(typeof item.purchasePrice) ||
+          !Number.isFinite(purchasePrice) ||
+          purchasePrice < 0
+        ) {
           throw ApiError.badRequest(`Valid purchase cost is required for "${product.name}".`);
         }
 
-        const batchNo = item.batchNumber?.trim();
+        const batchNo = typeof item.batchNumber === 'string' ? item.batchNumber.trim() : '';
         if (!batchNo) {
           throw ApiError.badRequest(`Batch number is required for receiving "${product.name}".`);
         }
@@ -104,6 +133,13 @@ export class PurchaseService {
         const expiryDate = new Date(item.expiryDate);
         if (isNaN(expiryDate.getTime())) {
           throw ApiError.badRequest(`Valid expiry date is required for batch ${batchNo} of "${product.name}".`);
+        }
+        const expiryDay = new Date(expiryDate);
+        expiryDay.setHours(0, 0, 0, 0);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (expiryDay <= today) {
+          throw ApiError.badRequest(`Batch ${batchNo} of "${product.name}" must expire after today.`);
         }
 
         const lineTotal = Math.round(purchasePrice * qty * 100) / 100;
@@ -113,26 +149,36 @@ export class PurchaseService {
         // Find or create batch
         let batchDoc = await Batch.findOne({ product: product._id, batchNumber: batchNo });
         let isNewBatch = false;
+        let previousStock = 0;
 
         if (batchDoc) {
+          if (
+            batchDoc.supplier &&
+            batchDoc.supplier.toString() !== resolvedSupplier._id.toString()
+          ) {
+            throw ApiError.conflict(
+              `Batch ${batchNo} of "${product.name}" is already linked to a different supplier.`
+            );
+          }
+          previousStock = batchDoc.availableQuantity;
           // Increment existing batch quantity
-          await Batch.updateOne(
-            { _id: batchDoc._id },
-            {
-              $inc: { availableQuantity: qty },
-              $set: { purchasePrice, expiryDate }
-            }
-          );
+          batchDoc.availableQuantity += qty;
+          batchDoc.purchasePrice = purchasePrice;
+          batchDoc.expiryDate = expiryDate;
+          batchDoc.supplier = resolvedSupplier._id;
+          batchDoc.supplierName = resolvedSupplier.companyName;
+          await batchDoc.save();
         } else {
           // Create new authoritative batch
           isNewBatch = true;
           batchDoc = await Batch.create({
             batchNumber: batchNo,
             product: product._id,
+            supplier: resolvedSupplier._id,
+            supplierName: resolvedSupplier.companyName,
             expiryDate,
             purchasePrice,
             availableQuantity: qty,
-            supplier: resolvedSupplier.companyName
           });
         }
 
@@ -142,6 +188,8 @@ export class PurchaseService {
           productId: product._id,
           productName: product.name,
           addedQty: qty,
+          previousStock,
+          newStock: previousStock + qty,
           isNew: isNewBatch,
           purchasePrice
         });
@@ -172,17 +220,13 @@ export class PurchaseService {
 
     // 4. Log Immutable StockMovement Audit Trail for Each Line Received
     for (const step of completedBatchIncrements) {
-      const currentBatch = await Batch.findById(step.batchId);
-      const newBatchQty = currentBatch?.availableQuantity || step.addedQty;
-      const prevBatchQty = Math.max(0, newBatchQty - step.addedQty);
-
       await StockMovement.create({
         product: step.productId,
         batch: step.batchId,
         movementType: 'RECEIPT',
         quantity: step.addedQty,
-        previousStock: prevBatchQty,
-        newStock: newBatchQty,
+        previousStock: step.previousStock,
+        newStock: step.newStock,
         reason: `Inward stock receipt from ${resolvedSupplier.companyName} (${poNumber})`,
         reference: poNumber,
         performedBy: receivedBy
@@ -197,9 +241,8 @@ export class PurchaseService {
 
     // 6. Financial summary
     const cleanSubtotal = Math.round(calculatedSubtotal * 100) / 100;
-    const standardTaxPercent = 5; // 5% GST
-    const taxAmount = Math.round(((cleanSubtotal * standardTaxPercent) / 100) * 100) / 100;
-    const grandTotal = Math.round((cleanSubtotal + taxAmount) * 100) / 100;
+    const taxAmount = 0;
+    const grandTotal = cleanSubtotal;
 
     // 7. Persist Authoritative Purchase Order Document
     const purchase = await purchaseRepository.create({
@@ -213,6 +256,7 @@ export class PurchaseService {
       totalQuantity: totalQtyReceived,
       subtotal: cleanSubtotal,
       taxAmount,
+      taxPercent: 0,
       grandTotal,
       receivingStatus: 'Received',
       paymentStatus,

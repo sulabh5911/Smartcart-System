@@ -14,6 +14,17 @@ import { config } from '../config/env.js';
 export const errorHandler = (err, req, res, next) => {
   let error = err;
 
+  if (error?.code === 11000) {
+    const field = Object.keys(error.keyPattern || {})[0];
+    const message =
+      field === 'barcode'
+        ? 'This barcode is already assigned to another product.'
+        : field === 'sku'
+        ? 'A product with this SKU already exists.'
+        : 'A record with the supplied unique value already exists.';
+    error = ApiError.conflict(message);
+  }
+
   // Agar error ApiError ka instance nahi hai (e.g. standard SyntaxError ya TypeError)
   if (!(error instanceof ApiError)) {
     const statusCode = error.statusCode || 500;

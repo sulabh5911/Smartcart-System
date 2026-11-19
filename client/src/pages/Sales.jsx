@@ -21,6 +21,28 @@ import {
   ShieldAlert
 } from 'lucide-react';
 
+function getReturnRefundAmount(line) {
+  const returnedAfterCents = Math.round(
+    (line.lineRefundableCents *
+      (line.alreadyReturned + (line.returnQuantity || 0))) /
+      line.originalQuantity
+  );
+  const previouslyRefundedCents = Math.round(line.refundedAmount * 100);
+  return Math.max(0, returnedAfterCents - previouslyRefundedCents) / 100;
+}
+
+function getInvoiceRefundLimit(invoice) {
+  return Math.max(
+    0,
+    (Number(invoice.subtotal) || 0) - (Number(invoice.discountAmount) || 0)
+  );
+}
+
+function getInvoiceRefundAmount(invoice) {
+  const totalRefunded = Math.max(0, Number(invoice.totalRefunded) || 0);
+  return Math.min(getInvoiceRefundLimit(invoice), totalRefunded);
+}
+
 export default function Sales() {
   const { addToast } = useToast();
   const [sales, setSales] = useState([]);
@@ -67,14 +89,35 @@ export default function Sales() {
   // Open Return Modal
   const handleOpenReturn = (s) => {
     setSaleForReturn(s);
+    const totalRefundableCents = Math.round(getInvoiceRefundLimit(s) * 100);
+    const lineWeights = s.items.map((item) =>
+      Math.max(
+        0,
+        Math.round(
+          Number(item.itemTotal ?? Number(item.unitPrice) * Number(item.quantity)) * 100
+        )
+      )
+    );
+    const totalWeight = lineWeights.reduce((sum, weight) => sum + weight, 0);
+    let remainingRefundableCents = totalRefundableCents;
     // Initialize return lines with remaining eligible quantity
-    const initialLines = s.items.map((it) => {
+    const initialLines = s.items.map((it, index) => {
       const alreadyReturned = it.returnedQuantity || 0;
       const eligible = Math.max(0, it.quantity - alreadyReturned);
+      const lineRefundableCents =
+        index === s.items.length - 1
+          ? remainingRefundableCents
+          : totalWeight > 0
+          ? Math.round((totalRefundableCents * lineWeights[index]) / totalWeight)
+          : 0;
+      remainingRefundableCents -= lineRefundableCents;
       return {
         productId: it.product?._id || it.product,
         name: it.name,
         unitPrice: it.unitPrice,
+        lineRefundableCents,
+        refundedAmount:
+          Number(it.refundedAmount) || it.unitPrice * (it.returnedQuantity || 0),
         originalQuantity: it.quantity,
         alreadyReturned,
         eligible,
@@ -105,9 +148,10 @@ export default function Sales() {
   // Calculated refund total
   const calculatedRefundTotal = useMemo(() => {
     return returnItemsState.reduce((acc, it) => {
-      return acc + it.unitPrice * (it.returnQuantity || 0);
+      return acc + getReturnRefundAmount(it);
     }, 0);
   }, [returnItemsState]);
+  const hasReturnQuantity = returnItemsState.some((item) => item.returnQuantity > 0);
 
   // Submit Return to Backend
   const handleSubmitReturn = async () => {
@@ -305,6 +349,7 @@ export default function Sales() {
                   const hasEligibleReturns = s.items.some(
                     (it) => it.quantity > (it.returnedQuantity || 0)
                   );
+                  const displayedRefund = getInvoiceRefundAmount(s);
                   return (
                     <tr key={s._id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-3.5 px-4 font-mono font-bold text-slate-900">{s.invoiceNumber}</td>
@@ -325,9 +370,9 @@ export default function Sales() {
                       </td>
                       <td className="py-3.5 px-4 text-right font-black text-slate-900">
                         <div>₹ {s.totalAmount?.toFixed(2)}</div>
-                        {s.totalRefunded > 0 && (
+                        {displayedRefund > 0 && (
                           <div className="text-[10px] text-rose-600 font-semibold">
-                            - ₹{s.totalRefunded.toFixed(2)} refunded
+                            - ₹{displayedRefund.toFixed(2)} refunded
                           </div>
                         )}
                       </td>
@@ -470,20 +515,15 @@ export default function Sales() {
                   <span>- ₹{selectedInvoice.discountAmount?.toFixed(2)}</span>
                 </div>
               )}
-              <div className="flex justify-between">
-                <span>GST Tax (5%):</span>
-                <span>+ ₹{selectedInvoice.taxAmount?.toFixed(2)}</span>
-              </div>
-
               <div className="pt-2 border-t border-slate-900 flex justify-between items-baseline text-slate-900">
                 <span className="font-bold text-sm">TOTAL PAID:</span>
                 <span className="font-black text-lg">₹{selectedInvoice.totalAmount?.toFixed(2)}</span>
               </div>
 
-              {selectedInvoice.totalRefunded > 0 && (
+              {getInvoiceRefundAmount(selectedInvoice) > 0 && (
                 <div className="pt-1 border-t border-dashed border-rose-200 flex justify-between text-rose-600 font-bold">
                   <span>TOTAL REFUNDED:</span>
-                  <span>- ₹{selectedInvoice.totalRefunded.toFixed(2)}</span>
+                  <span>- ₹{getInvoiceRefundAmount(selectedInvoice).toFixed(2)}</span>
                 </div>
               )}
             </div>
@@ -515,11 +555,13 @@ export default function Sales() {
             <Button
               variant="primary"
               onClick={handleSubmitReturn}
-              disabled={isSubmittingReturn || calculatedRefundTotal <= 0}
+              disabled={isSubmittingReturn || !hasReturnQuantity}
             >
               {isSubmittingReturn
-                ? 'Processing Refund...'
-                : `Refund ₹${calculatedRefundTotal.toFixed(2)}`}
+                ? 'Processing Return...'
+                : calculatedRefundTotal > 0
+                ? `Refund ₹${calculatedRefundTotal.toFixed(2)}`
+                : 'Process Return (No Refund)'}
             </Button>
           </>
         }
@@ -551,6 +593,15 @@ export default function Sales() {
                   <span className="font-bold text-blue-600">
                     Max Eligible: {line.eligible} units
                   </span>
+                </div>
+                <div className="text-[11px] font-semibold text-emerald-700">
+                  Refund value after discount (tax excluded): ₹
+                  {(line.lineRefundableCents / 100).toFixed(2)}
+                  {line.returnQuantity > 0 && (
+                    <span className="ml-2">
+                      · Refund now: ₹{getReturnRefundAmount(line).toFixed(2)}
+                    </span>
+                  )}
                 </div>
 
                 {line.eligible > 0 ? (

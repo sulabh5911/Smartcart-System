@@ -3,7 +3,6 @@ import { ApiError } from '../utils/ApiError.js';
 
 export class CustomerService {
   async getAllCustomers(query) {
-    await customerRepository.ensureDefaultCustomers();
     return await customerRepository.findAll(query);
   }
 

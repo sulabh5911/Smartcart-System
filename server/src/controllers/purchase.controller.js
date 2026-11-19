@@ -4,7 +4,10 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 
 export class PurchaseController {
   receiveStock = asyncHandler(async (req, res) => {
-    const result = await purchaseService.receiveStock(req.body);
+    const result = await purchaseService.receiveStock({
+      ...req.body,
+      receivedBy: req.user.name
+    });
     const payload = {
       purchase: result.purchase,
       isDuplicate: !!result.isDuplicate

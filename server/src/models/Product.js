@@ -27,7 +27,10 @@ const productSchema = new mongoose.Schema(
     barcode: {
       type: String,
       trim: true,
-      index: true
+      validate: {
+        validator: (value) => value == null || /^[\x20-\x7E]{1,64}$/.test(value),
+        message: 'Barcode must contain 1-64 printable ASCII characters.'
+      }
     },
     category: {
       type: mongoose.Schema.Types.ObjectId,
@@ -61,7 +64,7 @@ const productSchema = new mongoose.Schema(
     },
     image: {
       type: String,
-      default: 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=120&auto=format&fit=crop&q=80'
+      default: ''
     },
     status: {
       type: String,
@@ -85,5 +88,9 @@ const productSchema = new mongoose.Schema(
 
 // Compound Text Index for fast catalog searches by name & SKU
 productSchema.index({ name: 'text', sku: 'text' });
+productSchema.index(
+  { barcode: 1 },
+  { unique: true, partialFilterExpression: { barcode: { $type: 'string', $gt: '' } } }
+);
 
 export const Product = mongoose.model('Product', productSchema);

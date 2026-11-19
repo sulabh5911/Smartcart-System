@@ -8,9 +8,7 @@ import {
   Mail,
   Eye,
   EyeOff,
-  ShieldCheck,
   AlertCircle,
-  KeyRound,
   UserCheck
 } from 'lucide-react';
 
@@ -25,37 +23,6 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-
-  // Quick Demo Staff Accounts
-  const demoAccounts = [
-    {
-      role: 'Admin',
-      email: 'admin@smartmartpro.com',
-      password: 'AdminPassword123!',
-      color: 'border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100',
-      badge: 'Full Store Control'
-    },
-    {
-      role: 'Manager',
-      email: 'manager@smartmartpro.com',
-      password: 'ManagerPassword123!',
-      color: 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100',
-      badge: 'Inventory & Reports'
-    },
-    {
-      role: 'Cashier',
-      email: 'cashier@smartmartpro.com',
-      password: 'CashierPassword123!',
-      color: 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
-      badge: 'POS Billing'
-    }
-  ];
-
-  const handleQuickFill = (acc) => {
-    setEmail(acc.email);
-    setPassword(acc.password);
-    setError(null);
-  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -105,31 +72,6 @@ export default function Login() {
           </p>
         </div>
 
-        {/* Demo Quick-Fill Bar */}
-        <div className="bg-[#10192e] border border-[#1e2a4a] rounded-2xl p-4 shadow-lg space-y-2">
-          <div className="flex items-center justify-between text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-            <span className="flex items-center gap-1.5 text-blue-400">
-              <KeyRound className="w-3.5 h-3.5" />
-              Quick Demo Access
-            </span>
-            <span className="text-[10px] text-slate-500 font-normal">Click to auto-fill</span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2">
-            {demoAccounts.map((acc) => (
-              <button
-                key={acc.role}
-                type="button"
-                onClick={() => handleQuickFill(acc)}
-                className={`flex flex-col items-center justify-center p-2 rounded-xl border text-xs font-bold transition-all ${acc.color}`}
-              >
-                <span>{acc.role}</span>
-                <span className="text-[9px] font-normal opacity-80 mt-0.5">{acc.badge}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
         {/* Login Form Card */}
         <div className="bg-[#10192e] border border-[#1e2a4a] rounded-2xl p-6 shadow-2xl space-y-5">
           {error && (
@@ -153,7 +95,7 @@ export default function Login() {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="e.g. admin@smartmartpro.com"
+                  placeholder="Enter your staff email"
                   className="w-full pl-10 pr-4 py-2.5 bg-[#0a1020] border border-[#233154] rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
                 />
               </div>
@@ -205,20 +147,6 @@ export default function Login() {
             </button>
           </form>
 
-          {/* Security Notice */}
-          <div className="pt-2 border-t border-[#1e2a4a] flex items-center justify-between text-[10px] text-slate-500">
-            <span className="flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              JWT 24h & RBAC Enforced
-            </span>
-            <span>Brute-force Rate Limited</span>
-          </div>
-        </div>
-
-        {/* Credentials reminder footnote */}
-        <div className="text-center text-[11px] text-slate-500">
-          Default Passwords: <code className="text-slate-400 bg-[#10192e] px-1.5 py-0.5 rounded">AdminPassword123!</code> /{' '}
-          <code className="text-slate-400 bg-[#10192e] px-1.5 py-0.5 rounded">CashierPassword123!</code>
         </div>
       </div>
     </div>

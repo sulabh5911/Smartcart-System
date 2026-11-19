@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import { categoryRepository } from '../repositories/category.repository.js';
 import { ApiError } from '../utils/ApiError.js';
+import { Product } from '../models/Product.js';
+import { Supplier } from '../models/Supplier.js';
 
 /**
  * Category Service
@@ -57,6 +59,16 @@ export class CategoryService {
   async deleteCategory(id) {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       throw ApiError.badRequest('Invalid category ID format');
+    }
+
+    const [hasProducts, hasSuppliers] = await Promise.all([
+      Product.exists({ category: id }),
+      Supplier.exists({ categories: id })
+    ]);
+    if (hasProducts || hasSuppliers) {
+      throw ApiError.conflict(
+        'Cannot delete a category linked to products or suppliers. Reassign those records first.'
+      );
     }
 
     const deleted = await categoryRepository.delete(id);

@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Product } from '../models/Product.js';
 import { Batch } from '../models/Batch.js';
 import { Category } from '../models/Category.js';
+import { Supplier } from '../models/Supplier.js';
 
 /**
  * MongoDB Mongoose Product Repository
@@ -83,19 +84,37 @@ export class ProductRepository {
 
     // Attach total quantity aggregated from batches for each product
     const productIds = products.map((p) => p._id);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
     const batchTotals = await Batch.aggregate([
       { $match: { product: { $in: productIds } } },
-      { $group: { _id: '$product', totalStock: { $sum: '$availableQuantity' } } }
+      {
+        $group: {
+          _id: '$product',
+          totalStock: { $sum: '$availableQuantity' },
+          sellableStock: {
+            $sum: {
+              $cond: [{ $gt: ['$expiryDate', today] }, '$availableQuantity', 0]
+            }
+          }
+        }
+      }
     ]);
 
     const batchStockMap = new Map();
-    batchTotals.forEach((b) => batchStockMap.set(b._id.toString(), b.totalStock));
+    batchTotals.forEach((b) =>
+      batchStockMap.set(b._id.toString(), {
+        stock: b.totalStock,
+        sellableStock: b.sellableStock
+      })
+    );
 
     const enrichedProducts = products.map((prod) => {
-      const stock = batchStockMap.get(prod._id.toString()) ?? 0;
+      const { stock = 0, sellableStock = 0 } = batchStockMap.get(prod._id.toString()) || {};
       return {
         ...prod,
         stock,
+        sellableStock,
         // Computed dynamic status based on live batch stock vs threshold
         status:
           stock <= 0
@@ -107,7 +126,7 @@ export class ProductRepository {
     });
 
     return {
-      products: enrichedProducts,
+      products: await this.attachSuppliers(enrichedProducts),
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -131,17 +150,100 @@ export class ProductRepository {
     // Fetch all active batches for this product
     const batches = await Batch.find({ product: id }).sort({ expiryDate: 1 }).lean();
     const stock = batches.reduce((acc, b) => acc + b.availableQuantity, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const sellableStock = batches.reduce(
+      (acc, batch) => acc + (new Date(batch.expiryDate) > today ? batch.availableQuantity : 0),
+      0
+    );
+
+    const [enrichedProduct] = await this.attachSuppliers([{
+      ...product,
+      stock,
+      sellableStock,
+      batches
+    }]);
+
+    return enrichedProduct;
+  }
+
+  async attachSuppliers(products) {
+    if (!products.length) return products;
+
+    const suppliers = await Supplier.find({
+      products: { $in: products.map((product) => product._id) }
+    })
+      .select('companyName status products')
+      .lean();
+    const suppliersByProduct = new Map();
+    for (const supplier of suppliers) {
+      for (const productId of supplier.products) {
+        const key = productId.toString();
+        const linkedSuppliers = suppliersByProduct.get(key) || [];
+        linkedSuppliers.push({
+          _id: supplier._id,
+          companyName: supplier.companyName,
+          status: supplier.status
+        });
+        suppliersByProduct.set(key, linkedSuppliers);
+      }
+    }
+
+    return products.map((product) => ({
+      ...product,
+      suppliers: suppliersByProduct.get(product._id.toString()) || []
+    }));
+  }
+
+  async findByBarcode(barcode) {
+    const product = await Product.findOne({
+      barcode,
+      isArchived: { $ne: true },
+      status: { $ne: 'Archived' }
+    })
+      .populate('category', 'name slug color')
+      .lean();
+
+    if (!product) return null;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const batches = await Batch.find({
+      product: product._id,
+      availableQuantity: { $gt: 0 },
+      expiryDate: { $gt: today }
+    })
+      .select('batchNumber expiryDate availableQuantity')
+      .sort({ expiryDate: 1, _id: 1 })
+      .lean();
+    const sellableStock = batches.reduce((total, batch) => total + batch.availableQuantity, 0);
 
     return {
       ...product,
-      stock,
-      batches
+      stock: sellableStock,
+      sellableStock,
+      availability: {
+        status: sellableStock > 0 ? 'In Stock' : 'Out of Stock',
+        sellableQuantity: sellableStock,
+        batches: batches.map(({ batchNumber, expiryDate, availableQuantity }) => ({
+          batchNumber,
+          expiryDate,
+          availableQuantity
+        }))
+      }
     };
   }
 
   async findBySku(sku) {
     if (!sku) return null;
     return await Product.findOne({ sku: sku.trim().toUpperCase() });
+  }
+
+  async findBarcodeCollision(barcode, excludeId = null) {
+    if (!barcode) return null;
+    const filter = { barcode };
+    if (excludeId) filter._id = { $ne: excludeId };
+    return await Product.findOne(filter);
   }
 
   async create(productData) {

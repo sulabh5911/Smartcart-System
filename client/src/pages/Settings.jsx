@@ -1,31 +1,66 @@
-import React, { useState } from 'react';
-import { useMockData } from '../context/MockDataContext';
+import React, { useEffect, useState } from 'react';
+import { storeSettingsService } from '../services/storeSettingsService';
 import { useToast } from '../context/ToastContext';
 import { FormField, Input, Textarea, Button } from '../components/Form';
 import { Save, Store, Receipt } from 'lucide-react';
 
+const EMPTY_SETTINGS = {
+  storeName: '',
+  branch: '',
+  gstin: '',
+  phone: '',
+  email: '',
+  address: '',
+  receiptFooter: ''
+};
+
+function getSettingsFormData(settings = {}) {
+  return Object.fromEntries(
+    Object.keys(EMPTY_SETTINGS).map((field) => [field, settings[field] || ''])
+  );
+}
+
 export default function Settings() {
-  const { settings, updateSettings } = useMockData();
   const { addToast } = useToast();
+  const [formData, setFormData] = useState(EMPTY_SETTINGS);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
 
-  const [formData, setFormData] = useState({
-    storeName: settings.storeName || '',
-    branch: settings.branch || '',
-    gstin: settings.gstin || '',
-    phone: settings.phone || '',
-    email: settings.email || '',
-    address: settings.address || '',
-    defaultGstRate: String(settings.defaultGstRate || '5'),
-    receiptFooter: settings.receiptFooter || ''
-  });
+  useEffect(() => {
+    let active = true;
+    storeSettingsService
+      .get()
+      .then((response) => {
+        if (active) {
+          setFormData(getSettingsFormData(response?.data || {}));
+        }
+      })
+      .catch((error) => {
+        if (active) setLoadFailed(true);
+        addToast(error.message || 'Failed to load store settings from the API.', 'error');
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
 
-  const handleSubmit = (e) => {
+    return () => {
+      active = false;
+    };
+  }, [addToast]);
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    updateSettings({
-      ...formData,
-      defaultGstRate: Number(formData.defaultGstRate)
-    });
-    addToast('Store configuration saved successfully', 'success');
+    try {
+      setIsSaving(true);
+      const response = await storeSettingsService.update(formData);
+      setFormData(getSettingsFormData(response?.data || {}));
+      addToast('Store settings saved successfully.', 'success');
+    } catch (error) {
+      addToast(error.message || 'Failed to save store settings.', 'error');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -36,7 +71,21 @@ export default function Settings() {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
+        {isLoading && (
+          <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-500">
+            Loading store settings from the API...
+          </div>
+        )}
+        {loadFailed && (
+          <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+            Store settings could not be loaded. Reconnect to the API and reload this page before editing.
+          </div>
+        )}
         {/* Store Profile */}
+        <fieldset
+          disabled={isLoading || isSaving || loadFailed}
+          className="space-y-4 disabled:opacity-70"
+        >
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-3">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
             <Store className="w-4 h-4 text-blue-600" />
@@ -95,32 +144,23 @@ export default function Settings() {
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-3">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
             <Receipt className="w-4 h-4 text-blue-600" />
-            <h3 className="font-bold text-slate-900 text-sm">Billing & Receipt Parameters</h3>
+            <h3 className="font-bold text-slate-900 text-sm">Receipt Parameters</h3>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <FormField label="Default GST Rate (%)">
-              <Input
-                type="number"
-                value={formData.defaultGstRate}
-                onChange={(e) => setFormData({ ...formData, defaultGstRate: e.target.value })}
-              />
-            </FormField>
-
-            <FormField label="Receipt Footer Message">
-              <Input
-                value={formData.receiptFooter}
-                onChange={(e) => setFormData({ ...formData, receiptFooter: e.target.value })}
-              />
-            </FormField>
-          </div>
+          <FormField label="Receipt Footer Message">
+            <Input
+              value={formData.receiptFooter}
+              onChange={(e) => setFormData({ ...formData, receiptFooter: e.target.value })}
+            />
+          </FormField>
         </div>
 
         <div className="flex justify-end">
-          <Button type="submit" variant="primary" icon={Save}>
-            Save Settings
+          <Button type="submit" variant="primary" icon={Save} disabled={isLoading || isSaving}>
+            {isSaving ? 'Saving...' : 'Save Settings'}
           </Button>
         </div>
+        </fieldset>
       </form>
     </div>
   );

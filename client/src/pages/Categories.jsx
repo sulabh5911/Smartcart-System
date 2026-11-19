@@ -3,7 +3,7 @@ import { categoryService } from '../services/categoryService';
 import { useToast } from '../context/ToastContext';
 import Modal from '../components/Modal';
 import { FormField, Input, Textarea, Button } from '../components/Form';
-import { Plus, Search, Edit2, Trash2, RefreshCw, AlertCircle, Inbox, Layers } from 'lucide-react';
+import { Plus, Search, Edit2, Trash2, RefreshCw, AlertCircle, Inbox } from 'lucide-react';
 
 export default function Categories() {
   const { addToast } = useToast();

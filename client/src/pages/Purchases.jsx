@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { purchaseService } from '../services/purchaseService';
 import { supplierService } from '../services/supplierService';
 import { productService } from '../services/productService';
@@ -10,12 +10,93 @@ import {
   Plus,
   RefreshCw,
   Eye,
-  Truck,
-  CheckCircle2,
-  Calendar,
-  Layers,
-  ArrowRight
+  Trash2
 } from 'lucide-react';
+
+function createPurchaseLine() {
+  return {
+    productId: '',
+    batchNumber: '',
+    expiryDate: '',
+    purchasePrice: '',
+    quantity: ''
+  };
+}
+
+function getReferenceId(value) {
+  return String(value?._id || value || '');
+}
+
+function getLinkedProductsForSupplier(supplier, products) {
+  if (!supplier) return [];
+
+  const linkedProductIds = (supplier.products || []).map(getReferenceId);
+  if (linkedProductIds.length) {
+    return products.filter((product) => linkedProductIds.includes(product._id));
+  }
+
+  const linkedCategoryIds = (supplier.categories || []).map(getReferenceId);
+  if (linkedCategoryIds.length) {
+    return products.filter((product) =>
+      linkedCategoryIds.includes(getReferenceId(product.category))
+    );
+  }
+
+  const historicalProductIds = (supplier.historicalProducts || []).map(getReferenceId);
+  if (historicalProductIds.length) {
+    return products.filter((product) => historicalProductIds.includes(product._id));
+  }
+
+  return [];
+}
+
+function createSupplierPurchaseLines(supplier, products, purchases) {
+  const suppliedProducts = getLinkedProductsForSupplier(supplier, products);
+  if (!suppliedProducts.length) return [createPurchaseLine()];
+
+  const supplierId = getReferenceId(supplier._id);
+  const supplierPurchases = purchases
+    .filter((purchase) => {
+      const purchaseSupplierId = getReferenceId(purchase.supplier);
+      return purchaseSupplierId
+        ? purchaseSupplierId === supplierId
+        : purchase.supplierName === supplier.companyName;
+    })
+    .sort((first, second) => new Date(second.createdAt) - new Date(first.createdAt));
+  const lastPurchasePrices = new Map();
+
+  for (const purchase of supplierPurchases) {
+    for (const item of purchase.items || []) {
+      const productId = getReferenceId(item.product);
+      if (
+        productId &&
+        item.purchasePrice != null &&
+        !lastPurchasePrices.has(productId) &&
+        Number.isFinite(Number(item.purchasePrice))
+      ) {
+        lastPurchasePrices.set(productId, String(item.purchasePrice));
+      }
+    }
+  }
+
+  return suppliedProducts.map((product) => ({
+    ...createPurchaseLine(),
+    productId: product._id,
+    purchasePrice: lastPurchasePrices.get(product._id) || ''
+  }));
+}
+
+function getLocalDateInputValue(date = new Date()) {
+  const localDate = new Date(date);
+  localDate.setMinutes(localDate.getMinutes() - localDate.getTimezoneOffset());
+  return localDate.toISOString().slice(0, 10);
+}
+
+function getPurchaseTotal(purchase) {
+  const subtotal = Number(purchase.subtotal);
+  if (purchase.subtotal != null && Number.isFinite(subtotal)) return subtotal;
+  return Math.max(0, (Number(purchase.grandTotal) || 0) - (Number(purchase.taxAmount) || 0));
+}
 
 export default function Purchases() {
   const { addToast } = useToast();
@@ -35,106 +116,157 @@ export default function Purchases() {
   const [formData, setFormData] = useState({
     supplierId: '',
     invoiceReference: '',
-    productId: '',
-    batchNumber: '',
-    expiryDate: '',
-    purchasePrice: '',
-    quantity: ''
+    items: [createPurchaseLine()],
+    paymentStatus: 'Paid'
   });
+  const receiptIdempotencyKey = useRef(null);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [poRes, supRes, prodRes] = await Promise.all([
+      const [poRes, supRes, firstProdRes] = await Promise.all([
         purchaseService.getAll({ limit: 100 }),
-        supplierService.getAll({ limit: 100 }),
-        productService.getAll({ limit: 100 })
+        supplierService.getAll({ status: 'Active', limit: 100 }),
+        productService.getAll({ page: 1, limit: 100 })
       ]);
-      setPurchases(poRes?.data || []);
-      const sups = supRes?.data || [];
+      const purchaseRecords = poRes?.data || [];
+      setPurchases(purchaseRecords);
+      const sups = (supRes?.data || []).filter((supplier) => supplier.status === 'Active');
       setSuppliers(sups);
-      const prods = prodRes?.data || [];
+      const remainingPages = await Promise.all(
+        Array.from({ length: (firstProdRes.meta?.totalPages || 1) - 1 }, (_, index) =>
+          productService.getAll({ page: index + 2, limit: 100 })
+        )
+      );
+      const prods = [
+        ...(firstProdRes?.data || []),
+        ...remainingPages.flatMap((response) => response.data || [])
+      ];
       setProducts(prods);
 
-      if (sups.length > 0 && !formData.supplierId) {
-        setFormData((prev) => ({
-          ...prev,
-          supplierId: sups[0]._id,
-          productId: prods[0]?._id || '',
-          expiryDate: '2028-06-30'
-        }));
+      if (sups.length > 0) {
+        setFormData((prev) =>
+          prev.supplierId
+            ? prev
+            : {
+                ...prev,
+                supplierId: sups[0]._id,
+                items: createSupplierPurchaseLines(sups[0], prods, purchaseRecords)
+              }
+        );
       }
     } catch (err) {
-      addToast('Failed to load purchases from database', 'error');
+      addToast(err?.response?.data?.message || 'Failed to load purchases from database', 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [addToast]);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]);
+
+  const getProductsForSupplier = (supplierId) => {
+    const supplier = suppliers.find((item) => item._id === supplierId);
+    if (!supplier) return [];
+
+    const linkedProducts = getLinkedProductsForSupplier(supplier, products);
+    return supplier.products?.length || supplier.categories?.length || supplier.historicalProducts?.length
+      ? linkedProducts
+      : products;
+  };
+
+  const updatePurchaseLine = (index, field, value) => {
+    setFormData((current) => ({
+      ...current,
+      items: current.items.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item
+      )
+    }));
+  };
+
+  const handleSupplierChange = (supplierId) => {
+    const supplier = suppliers.find((item) => item._id === supplierId);
+    setFormData((current) => ({
+      ...current,
+      supplierId,
+      items: createSupplierPurchaseLines(supplier, products, purchases)
+    }));
+
+    if (supplier && !getLinkedProductsForSupplier(supplier, products).length) {
+      addToast('No products are linked to this supplier yet. Choose products manually or link them in Suppliers.', 'info');
+    }
+  };
 
   const handleCreateReceipt = async (e) => {
     e.preventDefault();
-    if (!formData.supplierId || !formData.productId) {
-      addToast('Supplier and product are required', 'warning');
+    if (!formData.supplierId || formData.items.some((item) => !item.productId)) {
+      addToast('Choose a supplier and a product for every purchase line', 'warning');
       return;
     }
-    if (!formData.batchNumber.trim()) {
-      addToast('Batch number is required for inward receipt', 'warning');
-      return;
-    }
-    if (!formData.expiryDate) {
-      addToast('Expiry date is required for batch tracking', 'warning');
-      return;
-    }
-    const qty = parseInt(formData.quantity, 10);
-    const cost = parseFloat(formData.purchasePrice);
-    if (isNaN(qty) || qty <= 0) {
-      addToast('Quantity must be an integer greater than 0', 'warning');
-      return;
-    }
-    if (isNaN(cost) || cost < 0) {
-      addToast('Valid purchase cost is required', 'warning');
-      return;
+    const today = getLocalDateInputValue();
+    for (const [index, item] of formData.items.entries()) {
+      if (!item.batchNumber.trim()) {
+        addToast(`Batch number is required for purchase line ${index + 1}`, 'warning');
+        return;
+      }
+      if (!item.expiryDate || item.expiryDate <= today) {
+        addToast(`Enter a future expiry date for purchase line ${index + 1}`, 'warning');
+        return;
+      }
+      const quantity = Number(item.quantity);
+      const purchasePrice = Number(item.purchasePrice);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        addToast(`Quantity must be a whole number greater than 0 on line ${index + 1}`, 'warning');
+        return;
+      }
+      if (item.purchasePrice.trim() === '' || !Number.isFinite(purchasePrice) || purchasePrice < 0) {
+        addToast(`Enter a valid purchase cost on line ${index + 1}`, 'warning');
+        return;
+      }
     }
 
     setIsSubmitting(true);
-    const idempotencyKey = `PO-RECEIPT-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    if (!receiptIdempotencyKey.current) {
+      receiptIdempotencyKey.current = `PO-RECEIPT-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    }
 
     try {
       const payload = {
         supplierId: formData.supplierId,
         invoiceReference: formData.invoiceReference.trim(),
-        items: [
-          {
-            productId: formData.productId,
-            batchNumber: formData.batchNumber.trim().toUpperCase(),
-            expiryDate: formData.expiryDate,
-            purchasePrice: cost,
-            quantity: qty
-          }
-        ],
-        paymentStatus: 'Paid',
-        idempotencyKey
+        items: formData.items.map((item) => ({
+          productId: item.productId,
+          batchNumber: item.batchNumber.trim().toUpperCase(),
+          expiryDate: item.expiryDate,
+          purchasePrice: Number(item.purchasePrice),
+          quantity: Number(item.quantity)
+        })),
+        paymentStatus: formData.paymentStatus,
+        idempotencyKey: receiptIdempotencyKey.current
       };
 
       const res = await purchaseService.receiveStock(payload);
       const poRecord = res.data?.purchase || res.data;
-      addToast(`Stock receipt ${poRecord.poNumber} created and batches added to inventory!`, 'success');
+      addToast(
+        res.data?.isDuplicate
+          ? `Stock receipt ${poRecord.poNumber} was already processed; inventory was not added again.`
+          : `Stock receipt ${poRecord.poNumber} created and batches added to inventory!`,
+        'success'
+      );
 
       setIsModalOpen(false);
+      receiptIdempotencyKey.current = null;
       setFormData((prev) => ({
         ...prev,
-        batchNumber: '',
-        purchasePrice: '',
-        quantity: '',
+        supplierId: '',
+        items: [createPurchaseLine()],
+        paymentStatus: 'Paid',
         invoiceReference: ''
       }));
-      loadData();
+      await loadData();
     } catch (err) {
-      addToast(err?.response?.data?.message || 'Failed to process inward stock receipt', 'error');
+      addToast(err?.message || 'Failed to process inward stock receipt', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -153,6 +285,15 @@ export default function Purchases() {
         (p.invoiceReference && p.invoiceReference.toLowerCase().includes(searchTerm.toLowerCase()))
     );
   }, [purchases, searchTerm]);
+
+  const estimatedSubtotal = formData.items.reduce(
+    (total, item) =>
+      total + Math.round((Number(item.purchasePrice) || 0) * (Number(item.quantity) || 0) * 100) / 100,
+    0
+  );
+  const availableProducts = getProductsForSupplier(formData.supplierId);
+  const selectedSupplier = suppliers.find((supplier) => supplier._id === formData.supplierId);
+  const supplierHasLinkedProducts = getLinkedProductsForSupplier(selectedSupplier, products).length > 0;
 
   return (
     <div className="space-y-4">
@@ -259,7 +400,7 @@ export default function Purchases() {
                       </span>
                     </td>
                     <td className="py-3.5 px-4 text-right font-black text-slate-900">
-                      ₹ {p.grandTotal?.toFixed(2)}
+                      ₹ {getPurchaseTotal(p).toFixed(2)}
                     </td>
                     <td className="py-3.5 px-4 text-center">
                       <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-600 border border-emerald-200">
@@ -305,8 +446,10 @@ export default function Purchases() {
             <FormField label="Supplier" required>
               <Select
                 value={formData.supplierId}
-                onChange={(e) => setFormData({ ...formData, supplierId: e.target.value })}
+                onChange={(e) => handleSupplierChange(e.target.value)}
                 options={suppliers.map((s) => ({ value: s._id, label: s.companyName }))}
+                placeholder={suppliers.length ? 'Select supplier...' : 'No active suppliers available'}
+                disabled={suppliers.length === 0}
               />
             </FormField>
 
@@ -318,73 +461,121 @@ export default function Purchases() {
               />
             </FormField>
           </div>
-
-          <FormField label="Product" required>
-            <Select
-              value={formData.productId}
-              onChange={(e) => {
-                const prod = products.find((p) => p._id === e.target.value);
-                setFormData({
-                  ...formData,
-                  productId: e.target.value,
-                  purchasePrice: prod?.purchasePrice || ''
-                });
-              }}
-              options={products.map((p) => ({
-                value: p._id,
-                label: `${p.name} (${p.sku}) — Current Stock: ${p.stock}`
-              }))}
-            />
-          </FormField>
-
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Batch Number" required>
-              <Input
-                value={formData.batchNumber}
-                onChange={(e) => setFormData({ ...formData, batchNumber: e.target.value })}
-                placeholder="e.g. B2026-90"
-              />
-            </FormField>
-
-            <FormField label="Expiry Date" required>
-              <Input
-                type="date"
-                value={formData.expiryDate}
-                onChange={(e) => setFormData({ ...formData, expiryDate: e.target.value })}
-              />
-            </FormField>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Purchase Cost / Unit (₹)" required>
-              <Input
-                type="number"
-                step="0.01"
-                value={formData.purchasePrice}
-                onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
-                placeholder="e.g. 45.00"
-              />
-            </FormField>
-
-            <FormField label="Received Quantity" required>
-              <Input
-                type="number"
-                min="1"
-                value={formData.quantity}
-                onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
-                placeholder="e.g. 50"
-              />
-            </FormField>
-          </div>
-
-          {formData.purchasePrice && formData.quantity && (
-            <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-lg text-xs flex justify-between font-bold text-blue-900">
-              <span>Estimated Inward Valuation:</span>
-              <span>
-                ₹ {(Number(formData.purchasePrice) * Number(formData.quantity) * 1.05).toFixed(2)} (incl. 5% GST)
-              </span>
-            </div>
+          {formData.supplierId && (
+            <p className="text-[11px] text-slate-500">
+              {supplierHasLinkedProducts
+                ? 'Linked products and their latest purchase costs are prefilled. Enter the batch, expiry, quantity and invoice details for this delivery.'
+                : 'No linked products found. Choose products manually; batch, expiry and quantity must match this delivery.'}
+            </p>
           )}
+
+          {formData.items.map((item, index) => (
+            <div key={index} className="p-3 border border-slate-200 rounded-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold text-slate-800">Purchase Line {index + 1}</div>
+                {formData.items.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFormData((current) => ({
+                        ...current,
+                        items: current.items.filter((_, itemIndex) => itemIndex !== index)
+                      }))
+                    }
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-700"
+                    aria-label={`Remove purchase line ${index + 1}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Remove
+                  </button>
+                )}
+              </div>
+              <FormField label="Product" required>
+                <Select
+                  value={item.productId}
+                  onChange={(event) => updatePurchaseLine(index, 'productId', event.target.value)}
+                  options={availableProducts.map((product) => ({
+                    value: product._id,
+                    label: `${product.name} (${product.sku}) — Stock: ${product.stock || 0}`
+                  }))}
+                  placeholder={availableProducts.length ? 'Select product...' : 'No products linked to this supplier'}
+                  disabled={!formData.supplierId || availableProducts.length === 0}
+                />
+              </FormField>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Batch Number" required>
+                  <Input
+                    value={item.batchNumber}
+                    onChange={(event) => updatePurchaseLine(index, 'batchNumber', event.target.value)}
+                    placeholder="e.g. B2026-90"
+                  />
+                </FormField>
+                <FormField label="Expiry Date" required>
+                  <Input
+                    type="date"
+                    min={getLocalDateInputValue()}
+                    value={item.expiryDate}
+                    onChange={(event) => updatePurchaseLine(index, 'expiryDate', event.target.value)}
+                  />
+                </FormField>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Purchase Cost / Unit (₹)" required>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={item.purchasePrice}
+                    onChange={(event) => updatePurchaseLine(index, 'purchasePrice', event.target.value)}
+                    placeholder="e.g. 45.00"
+                  />
+                </FormField>
+                <FormField label="Received Quantity" required>
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={item.quantity}
+                    onChange={(event) => updatePurchaseLine(index, 'quantity', event.target.value)}
+                    placeholder="e.g. 50"
+                  />
+                </FormField>
+              </div>
+            </div>
+          ))}
+
+          <Button
+            type="button"
+            variant="secondary"
+            icon={Plus}
+            disabled={!formData.supplierId}
+            onClick={() => setFormData((current) => ({ ...current, items: [...current.items, createPurchaseLine()] }))}
+          >
+            Add another product
+          </Button>
+
+          <div className="grid grid-cols-1 gap-3">
+            <FormField label="Payment Status" required>
+              <Select
+                value={formData.paymentStatus}
+                onChange={(event) => setFormData({ ...formData, paymentStatus: event.target.value })}
+                options={[
+                  { value: 'Paid', label: 'Paid' },
+                  { value: 'Pending', label: 'Pending' }
+                ]}
+              />
+            </FormField>
+          </div>
+          <div className="grid grid-cols-1 gap-3">
+            <div className="self-end p-2.5 bg-blue-50 border border-blue-200 rounded-lg text-xs space-y-1">
+              <div className="flex justify-between gap-4 text-slate-700">
+                <span>Subtotal</span><strong>₹ {estimatedSubtotal.toFixed(2)}</strong>
+              </div>
+              <div className="flex justify-between gap-4 border-t border-blue-200 pt-1 font-bold text-blue-900">
+                <span>Estimated Total</span><span>₹ {estimatedSubtotal.toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
         </form>
       </Modal>
 
@@ -415,6 +606,10 @@ export default function Purchases() {
                 <span className="text-slate-400">Date Received:</span>
                 <span className="text-slate-800">{new Date(selectedPO.createdAt).toLocaleString()}</span>
               </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Subtotal:</span>
+                <span className="text-slate-800">₹ {selectedPO.subtotal?.toFixed(2)}</span>
+              </div>
             </div>
 
             <div>
@@ -441,7 +636,7 @@ export default function Purchases() {
 
             <div className="pt-2 border-t border-slate-200 flex justify-between text-xs font-bold text-slate-900">
               <span>Grand Total:</span>
-              <span className="text-sm font-black text-emerald-600">₹ {selectedPO.grandTotal?.toFixed(2)}</span>
+              <span className="text-sm font-black text-emerald-600">₹ {getPurchaseTotal(selectedPO).toFixed(2)}</span>
             </div>
           </div>
         )}

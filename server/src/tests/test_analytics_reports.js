@@ -94,8 +94,8 @@ async function runTests() {
     // Gross Sales = 5 * 120 = ₹600.00
     // Discount = 10% of 600 = ₹60.00
     // Taxable = 600 - 60 = ₹540.00
-    // Tax (5%) = 5% of 540 = ₹27.00
-    // Grand Total = 540 + 27 = ₹567.00
+    // GST is not added to POS bills.
+    // Grand Total = 600 - 60 = ₹540.00
     // COGS = 5 * 70 = ₹350.00
     // Net Sales (excl tax) = 600 - 60 = ₹540.00
     // Gross Profit = Net Sales - COGS = 540 - 350 = ₹190.00
@@ -116,6 +116,9 @@ async function runTests() {
     });
     const sale = (await saleRes.json()).data.sale;
     console.log(`Billed Invoice #${sale.invoiceNumber}: Subtotal ₹${sale.subtotal}, Discount ₹${sale.discountAmount}, Tax ₹${sale.taxAmount}, Total ₹${sale.totalAmount}`);
+    if (sale.taxAmount !== 0 || sale.taxPercent !== 0 || sale.totalAmount !== 540) {
+      throw new Error('POS checkout must not add GST to the discounted total.');
+    }
 
     // Verify after-sale analytics
     const afterSaleAnalytics = (await (await fetch(`${API_BASE}/reports/analytics?preset=all`)).json()).data.summary;
@@ -157,7 +160,8 @@ async function runTests() {
     console.log('-------------------------------------------------------------');
 
     // Customer returns 2 of the 5 units.
-    // Line refund rate = ₹120.00 per unit -> Refund = 2 * 120 = ₹240.00
+    // The ₹60 invoice discount is prorated across 5 units. Paid rate = ₹108/unit.
+    // Returning 2 units refunds ₹216.00.
     const returnPayload = {
       saleId: sale._id,
       invoiceNumber: sale.invoiceNumber,
@@ -187,10 +191,10 @@ async function runTests() {
     const deltaRefund = Math.round((afterReturnAnalytics.totalRefunded - afterSaleAnalytics.totalRefunded) * 100) / 100;
     const finalNetDelta = Math.round((afterSaleAnalytics.netSales - afterReturnAnalytics.netSales) * 100) / 100;
 
-    console.log(`   Expected Refund Delta: ₹240.00 | Actual: ₹${deltaRefund}`);
-    console.log(`   Net Sales Reduction by Refund: Expected ₹240.00 | Actual: ₹${finalNetDelta}`);
+    console.log(`   Expected Refund Delta: ₹216.00 | Actual: ₹${deltaRefund}`);
+    console.log(`   Net Sales Reduction by Refund: Expected ₹216.00 | Actual: ₹${finalNetDelta}`);
 
-    if (deltaRefund === 240 && finalNetDelta === 240) {
+    if (ret.refundAmount === 216 && deltaRefund === 216 && finalNetDelta === 216) {
       console.log('✅ Refund Convention PASSED: Net sales and money collected accurately reduced by refund!');
     } else {
       throw new Error('❌ Refund Convention Verification Failed!');

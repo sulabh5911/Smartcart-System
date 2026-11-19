@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { inventoryService } from '../services/inventoryService';
 import { productService } from '../services/productService';
 import { categoryService } from '../services/categoryService';
+import { supplierService } from '../services/supplierService';
 import { useToast } from '../context/ToastContext';
 import Modal from '../components/Modal';
 import { FormField, Input, Select, Button, Textarea } from '../components/Form';
@@ -42,6 +43,7 @@ export default function Inventory() {
   // Batches State
   const [batches, setBatches] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
   const [productsList, setProductsList] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, limit: 8, total: 0, totalPages: 1 });
 
@@ -64,14 +66,14 @@ export default function Inventory() {
   const [isReceiveModalOpen, setIsReceiveModalOpen] = useState(false);
   const [receiveForm, setReceiveForm] = useState({
     productId: '',
+    supplierId: '',
     batchNumber: '',
     purchasePrice: '',
     quantity: '',
     mfgDate: new Date().toISOString().split('T')[0],
     expiryDate: '',
     reference: '',
-    reason: 'Purchase order inward receipt',
-    performedBy: 'Store Manager'
+    reason: 'Purchase order inward receipt'
   });
   const [receiveErrors, setReceiveErrors] = useState({});
   const [isReceivingSubmitting, setIsReceivingSubmitting] = useState(false);
@@ -83,8 +85,7 @@ export default function Inventory() {
     adjustmentType: 'SUBTRACT',
     quantity: '',
     reason: 'Damaged packaging during shelf stocking',
-    reference: '',
-    performedBy: 'Store Supervisor'
+    reference: ''
   });
   const [adjustErrors, setAdjustErrors] = useState({});
   const [isAdjustSubmitting, setIsAdjustSubmitting] = useState(false);
@@ -102,11 +103,13 @@ export default function Inventory() {
   // Fetch Categories & Products for Dropdowns
   const fetchDropdownData = useCallback(async () => {
     try {
-      const [catRes, prodRes] = await Promise.all([
+      const [catRes, prodRes, supplierRes] = await Promise.all([
         categoryService.getAll(),
-        productService.getAll({ limit: 100 })
+        productService.getAll({ limit: 100 }),
+        supplierService.getAll({ status: 'Active', limit: 100 })
       ]);
       setCategories(catRes.data || []);
+      setSuppliers((supplierRes.data || []).filter((supplier) => supplier.status === 'Active'));
       setProductsList(prodRes.data || []);
       if (!receiveForm.productId && prodRes.data?.length > 0) {
         setReceiveForm((prev) => ({ ...prev, productId: prodRes.data[0]._id }));
@@ -183,11 +186,18 @@ export default function Inventory() {
     const errs = {};
     if (!receiveForm.productId) errs.productId = 'Product selection is required';
     if (!receiveForm.batchNumber.trim()) errs.batchNumber = 'Batch number is required';
-    const price = parseFloat(receiveForm.purchasePrice);
-    if (isNaN(price) || price < 0) errs.purchasePrice = 'Valid cost price required';
-    const qty = parseInt(receiveForm.quantity, 10);
-    if (isNaN(qty) || qty <= 0) errs.quantity = 'Quantity must be > 0';
-    if (!receiveForm.expiryDate) errs.expiryDate = 'Expiry date is required';
+    const price = Number(receiveForm.purchasePrice);
+    if (receiveForm.purchasePrice === '' || !Number.isFinite(price) || price < 0) {
+      errs.purchasePrice = 'Valid cost price required';
+    }
+    const qty = Number(receiveForm.quantity);
+    if (!Number.isInteger(qty) || qty <= 0) errs.quantity = 'Quantity must be a whole number greater than 0';
+    const expiry = new Date(`${receiveForm.expiryDate}T00:00:00`);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (!receiveForm.expiryDate || Number.isNaN(expiry.getTime()) || expiry <= today) {
+      errs.expiryDate = 'Expiry date must be after today';
+    }
 
     if (Object.keys(errs).length > 0) {
       setReceiveErrors(errs);
@@ -198,28 +208,28 @@ export default function Inventory() {
     try {
       const res = await inventoryService.receiveStock({
         productId: receiveForm.productId,
+        supplierId: receiveForm.supplierId || undefined,
         batchNumber: receiveForm.batchNumber.trim().toUpperCase(),
         purchasePrice: price,
         quantity: qty,
         mfgDate: receiveForm.mfgDate,
         expiryDate: receiveForm.expiryDate,
         reference: receiveForm.reference.trim() || 'PO-MANUAL',
-        reason: receiveForm.reason.trim(),
-        performedBy: receiveForm.performedBy.trim()
+        reason: receiveForm.reason.trim()
       });
 
       addToast(res.message || 'Stock received and logged to audit trail!', 'success');
       setIsReceiveModalOpen(false);
       setReceiveForm({
         productId: productsList[0]?._id || '',
+        supplierId: '',
         batchNumber: '',
         purchasePrice: '',
         quantity: '',
         mfgDate: new Date().toISOString().split('T')[0],
         expiryDate: '',
         reference: '',
-        reason: 'Purchase order inward receipt',
-        performedBy: 'Store Manager'
+        reason: 'Purchase order inward receipt'
       });
       setReceiveErrors({});
       // Refresh inventory batches and summary metrics
@@ -238,8 +248,7 @@ export default function Inventory() {
       adjustmentType: 'SUBTRACT',
       quantity: '',
       reason: 'Damaged packaging during shelf stocking',
-      reference: '',
-      performedBy: 'Store Supervisor'
+      reference: ''
     });
     setAdjustErrors({});
     setIsAdjustModalOpen(true);
@@ -249,8 +258,8 @@ export default function Inventory() {
   const handleAdjustSubmit = async (e) => {
     e.preventDefault();
     const errs = {};
-    const qty = parseInt(adjustForm.quantity, 10);
-    if (isNaN(qty) || qty < 0) errs.quantity = 'Valid quantity is required';
+    const qty = Number(adjustForm.quantity);
+    if (!Number.isInteger(qty) || qty <= 0) errs.quantity = 'Quantity must be a whole number greater than 0';
     if (!adjustForm.reason.trim() || adjustForm.reason.trim().length < 3) {
       errs.reason = 'Audit reason is mandatory (min 3 chars)';
     }
@@ -274,8 +283,7 @@ export default function Inventory() {
         adjustmentType: adjustForm.adjustmentType,
         quantity: qty,
         reason: adjustForm.reason.trim(),
-        reference: adjustForm.reference.trim() || 'ADJ-MANUAL',
-        performedBy: adjustForm.performedBy.trim()
+        reference: adjustForm.reference.trim() || 'ADJ-MANUAL'
       });
 
       addToast(res.message || 'Stock adjustment recorded with audit log!', 'success');
@@ -488,7 +496,9 @@ export default function Inventory() {
                   <tr>
                     <th className="py-3 px-4">Product Name</th>
                     <th className="py-3 px-3">SKU</th>
+                    <th className="py-3 px-3">Barcode</th>
                     <th className="py-3 px-3">Batch No</th>
+                    <th className="py-3 px-3">Supplier</th>
                     <th className="py-3 px-3">Category</th>
                     <th className="py-3 px-3">MFG Date</th>
                     <th className="py-3 px-3">Expiry Date</th>
@@ -507,7 +517,9 @@ export default function Inventory() {
                         <tr key={`batch-skel-${i}`} className="animate-pulse">
                           <td className="py-4 px-4"><div className="h-4 bg-slate-200 rounded w-28"></div></td>
                           <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-16"></div></td>
+                          <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
                           <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-14"></div></td>
+                          <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
                           <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-20"></div></td>
                           <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-20"></div></td>
                           <td className="py-4 px-3"><div className="h-4 bg-slate-200 rounded w-20"></div></td>
@@ -524,7 +536,7 @@ export default function Inventory() {
                   {/* Empty State */}
                   {!loading && !error && batches.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="py-16 text-center text-slate-400">
+                      <td colSpan={13} className="py-16 text-center text-slate-400">
                         <div className="flex flex-col items-center justify-center gap-2">
                           <Inbox className="w-8 h-8 opacity-40" />
                           <p className="text-xs font-medium">
@@ -558,8 +570,12 @@ export default function Inventory() {
                         <tr key={b._id} className="hover:bg-slate-50/80 transition-colors">
                           <td className="py-3 px-4 font-semibold text-slate-900">{prod.name || 'Unknown'}</td>
                           <td className="py-3 px-3 font-mono text-[11px] text-slate-500">{prod.sku || '---'}</td>
+                          <td className="py-3 px-3 font-mono text-[11px] text-slate-500">{prod.barcode || '---'}</td>
                           <td className="py-3 px-3 font-mono font-semibold text-blue-600 text-xs">
                             {b.batchNumber}
+                          </td>
+                          <td className="py-3 px-3 text-slate-600">
+                            {b.supplier?.companyName || b.supplierName || '—'}
                           </td>
                           <td className="py-3 px-3 text-slate-600">
                             <span className="inline-flex items-center gap-1.5">
@@ -910,6 +926,19 @@ export default function Inventory() {
             />
           </FormField>
 
+          <FormField label="Supplier (Optional)">
+            <Select
+              value={receiveForm.supplierId}
+              onChange={(e) => setReceiveForm({ ...receiveForm, supplierId: e.target.value })}
+              options={suppliers.map((supplier) => ({
+                value: supplier._id,
+                label: supplier.companyName
+              }))}
+              placeholder="Manual receipt / no supplier"
+              disabled={isReceivingSubmitting}
+            />
+          </FormField>
+
           <div className="grid grid-cols-2 gap-3">
             <FormField label="Batch Number" required error={receiveErrors.batchNumber}>
               <Input
@@ -957,25 +986,14 @@ export default function Inventory() {
             </FormField>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Reference (PO # / Invoice #)">
-              <Input
-                value={receiveForm.reference}
-                onChange={(e) => setReceiveForm({ ...receiveForm, reference: e.target.value })}
-                placeholder="e.g. PO-2026-104"
-                disabled={isReceivingSubmitting}
-              />
-            </FormField>
-
-            <FormField label="Authorized By">
-              <Input
-                value={receiveForm.performedBy}
-                onChange={(e) => setReceiveForm({ ...receiveForm, performedBy: e.target.value })}
-                placeholder="e.g. Store Manager"
-                disabled={isReceivingSubmitting}
-              />
-            </FormField>
-          </div>
+          <FormField label="Reference (PO # / Invoice #)">
+            <Input
+              value={receiveForm.reference}
+              onChange={(e) => setReceiveForm({ ...receiveForm, reference: e.target.value })}
+              placeholder="e.g. PO-2026-104"
+              disabled={isReceivingSubmitting}
+            />
+          </FormField>
 
           <FormField label="Receiving Reason / Notes">
             <Input
@@ -1062,25 +1080,14 @@ export default function Inventory() {
             />
           </FormField>
 
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label="Reference Note">
-              <Input
-                value={adjustForm.reference}
-                onChange={(e) => setAdjustForm({ ...adjustForm, reference: e.target.value })}
-                placeholder="e.g. AUDIT-2026-OCT"
-                disabled={isAdjustSubmitting}
-              />
-            </FormField>
-
-            <FormField label="Authorized Supervisor">
-              <Input
-                value={adjustForm.performedBy}
-                onChange={(e) => setAdjustForm({ ...adjustForm, performedBy: e.target.value })}
-                placeholder="e.g. Senior Supervisor"
-                disabled={isAdjustSubmitting}
-              />
-            </FormField>
-          </div>
+          <FormField label="Reference Note">
+            <Input
+              value={adjustForm.reference}
+              onChange={(e) => setAdjustForm({ ...adjustForm, reference: e.target.value })}
+              placeholder="e.g. AUDIT-2026-OCT"
+              disabled={isAdjustSubmitting}
+            />
+          </FormField>
         </form>
       </Modal>
     </div>

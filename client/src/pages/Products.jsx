@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { productService } from '../services/productService';
 import { categoryService } from '../services/categoryService';
+import { inventoryService } from '../services/inventoryService';
 import { useToast } from '../context/ToastContext';
 import Modal from '../components/Modal';
+import BarcodeScanner from '../components/BarcodeScanner';
 import { FormField, Input, Select, Button } from '../components/Form';
 import {
   Download,
-  Upload,
   Plus,
   Search,
   Edit2,
@@ -15,8 +16,15 @@ import {
   ChevronRight,
   RefreshCw,
   AlertCircle,
-  Inbox
+  Inbox,
+  Barcode
 } from 'lucide-react';
+
+function getLocalDateInputValue(date = new Date()) {
+  const localDate = new Date(date);
+  localDate.setMinutes(localDate.getMinutes() - localDate.getTimezoneOffset());
+  return localDate.toISOString().slice(0, 10);
+}
 
 export default function Products() {
   const { addToast } = useToast();
@@ -32,12 +40,12 @@ export default function Products() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
-  const [selectedIds, setSelectedIds] = useState([]);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -46,6 +54,12 @@ export default function Products() {
     category: '',
     sellingPrice: '',
     initialStock: '',
+    initialPurchasePrice: '',
+    initialExpiryDate: '',
+    refillStock: '',
+    refillBatchNumber: '',
+    refillPurchasePrice: '',
+    refillExpiryDate: '',
     unit: 'packet',
     description: ''
   });
@@ -107,6 +121,12 @@ export default function Products() {
       category: categories[0]?._id || '',
       sellingPrice: '',
       initialStock: '',
+      initialPurchasePrice: '',
+      initialExpiryDate: '',
+      refillStock: '',
+      refillBatchNumber: '',
+      refillPurchasePrice: '',
+      refillExpiryDate: '',
       unit: 'packet',
       description: ''
     });
@@ -131,6 +151,12 @@ export default function Products() {
       category: p.category?._id || p.category || '',
       sellingPrice: String(p.sellingPrice || p.price || ''),
       initialStock: String(p.stock || 0),
+      initialPurchasePrice: '',
+      initialExpiryDate: '',
+      refillStock: '',
+      refillBatchNumber: '',
+      refillPurchasePrice: '',
+      refillExpiryDate: '',
       unit: p.unit || 'packet',
       description: p.description || ''
     });
@@ -149,10 +175,44 @@ export default function Products() {
       errs.sellingPrice = 'Valid price > 0 required';
     }
 
-    if (!editingProduct && formData.initialStock !== '') {
-      const stock = Number(formData.initialStock);
-      if (isNaN(stock) || stock < 0) {
-        errs.initialStock = 'Stock must be 0 or greater';
+    if (!editingProduct) {
+      const stock = Number(formData.initialStock || 0);
+      if (!Number.isInteger(stock) || stock < 0) {
+        errs.initialStock = 'Stock must be a whole number of 0 or greater';
+      } else if (stock > 0) {
+        const cost = Number(formData.initialPurchasePrice);
+        if (formData.initialPurchasePrice === '' || !Number.isFinite(cost) || cost < 0) {
+          errs.initialPurchasePrice = 'Enter a valid non-negative purchase cost';
+        }
+
+        const expiryDate = new Date(`${formData.initialExpiryDate}T00:00:00`);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (
+          !formData.initialExpiryDate ||
+          Number.isNaN(expiryDate.getTime()) ||
+          expiryDate <= today
+        ) {
+          errs.initialExpiryDate = 'Expiry date must be after today';
+        }
+      }
+    }
+
+    if (editingProduct && formData.refillStock !== '') {
+      const quantity = Number(formData.refillStock);
+      if (!Number.isInteger(quantity) || quantity < 0) {
+        errs.refillStock = 'Stock refill must be a whole number of 0 or greater';
+      } else if (quantity > 0) {
+        if (!formData.refillBatchNumber.trim()) {
+          errs.refillBatchNumber = 'Batch number is required to receive stock';
+        }
+        const cost = Number(formData.refillPurchasePrice);
+        if (formData.refillPurchasePrice === '' || !Number.isFinite(cost) || cost < 0) {
+          errs.refillPurchasePrice = 'Enter a valid non-negative purchase cost';
+        }
+        if (!formData.refillExpiryDate || Number.isNaN(Date.parse(formData.refillExpiryDate))) {
+          errs.refillExpiryDate = 'Expiry date is required to receive stock';
+        }
       }
     }
 
@@ -177,7 +237,35 @@ export default function Products() {
           unit: formData.unit,
           description: formData.description.trim()
         });
-        addToast(res.message || `Updated product "${formData.name}" in MongoDB`, 'success');
+        const refillQuantity = Number(formData.refillStock) || 0;
+        if (refillQuantity > 0) {
+          try {
+            const stockRes = await inventoryService.receiveStock({
+              productId: editingProduct._id,
+              batchNumber: formData.refillBatchNumber.trim().toUpperCase(),
+              purchasePrice: Number(formData.refillPurchasePrice),
+              quantity: refillQuantity,
+              expiryDate: formData.refillExpiryDate,
+              reason: `Stock received while editing product ${formData.sku.trim().toUpperCase()}`,
+              reference: 'PRODUCT-EDIT'
+            });
+            addToast(
+              `${res.message || `Updated product "${formData.name}"`}. ${stockRes.message || `${refillQuantity} units received into batch ${formData.refillBatchNumber.toUpperCase()}.`}`,
+              'success'
+            );
+          } catch (stockError) {
+            addToast(
+              `Product details were saved, but stock was not received: ${stockError.message || 'Inventory API error'}. Retry the stock receipt from Inventory.`,
+              'error',
+              7000
+            );
+            setFormErrors({ general: 'Product details saved, but stock receipt failed. Retry the stock receipt from Inventory.' });
+            await fetchProducts(pagination.page);
+            return;
+          }
+        } else {
+          addToast(res.message || `Updated product "${formData.name}" in MongoDB`, 'success');
+        }
       } else {
         // POST /api/products
         const res = await productService.create({
@@ -187,6 +275,8 @@ export default function Products() {
           category: formData.category,
           sellingPrice: Number(formData.sellingPrice),
           initialStock: Number(formData.initialStock) || 0,
+          purchasePrice: Number(formData.initialPurchasePrice),
+          expiryDate: formData.initialExpiryDate,
           unit: formData.unit,
           description: formData.description.trim()
         });
@@ -200,7 +290,9 @@ export default function Products() {
       // Backend error response handling
       if (err.errors && err.errors.length > 0) {
         const msg = err.errors.join(', ');
-        if (msg.toLowerCase().includes('sku')) {
+        if (msg.toLowerCase().includes('barcode')) {
+          setFormErrors({ barcode: msg });
+        } else if (msg.toLowerCase().includes('sku')) {
           setFormErrors({ sku: msg });
         } else {
           setFormErrors({ general: msg });
@@ -222,20 +314,6 @@ export default function Products() {
     } catch (err) {
       addToast(err.message || 'Failed to archive product', 'error');
     }
-  };
-
-  const toggleSelectAll = (e) => {
-    if (e.target.checked) {
-      setSelectedIds(products.map((p) => p._id));
-    } else {
-      setSelectedIds([]);
-    }
-  };
-
-  const toggleSelectRow = (id) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
-    );
   };
 
   return (
@@ -350,18 +428,11 @@ export default function Products() {
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-[11px] font-semibold text-slate-500 uppercase tracking-wider border-b border-slate-200">
               <tr>
-                <th className="py-3 px-3 w-8">
-                  <input
-                    type="checkbox"
-                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                    onChange={toggleSelectAll}
-                    checked={selectedIds.length > 0 && selectedIds.length === products.length}
-                  />
-                </th>
-                <th className="py-3 px-3 w-14">Image</th>
                 <th className="py-3 px-4">Name</th>
                 <th className="py-3 px-4">SKU</th>
+                <th className="py-3 px-4">Barcode</th>
                 <th className="py-3 px-4">Category</th>
+                <th className="py-3 px-4">Suppliers</th>
                 <th className="py-3 px-4 text-right">Price (₹)</th>
                 <th className="py-3 px-4 text-center">Live Stock</th>
                 <th className="py-3 px-4 text-center">Status</th>
@@ -374,10 +445,10 @@ export default function Products() {
                 <>
                   {[...Array(6)].map((_, i) => (
                     <tr key={`prod-skel-${i}`} className="animate-pulse">
-                      <td className="py-4 px-3"><div className="w-4 h-4 bg-slate-200 rounded"></div></td>
-                      <td className="py-4 px-3"><div className="w-10 h-10 bg-slate-200 rounded-lg"></div></td>
                       <td className="py-4 px-4"><div className="h-4 bg-slate-200 rounded w-32"></div></td>
                       <td className="py-4 px-4"><div className="h-4 bg-slate-200 rounded w-16"></div></td>
+                      <td className="py-4 px-4"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
+                      <td className="py-4 px-4"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
                       <td className="py-4 px-4"><div className="h-4 bg-slate-200 rounded w-24"></div></td>
                       <td className="py-4 px-4 text-right"><div className="h-4 bg-slate-200 rounded w-14 ml-auto"></div></td>
                       <td className="py-4 px-4 text-center"><div className="h-4 bg-slate-200 rounded w-12 mx-auto"></div></td>
@@ -408,33 +479,20 @@ export default function Products() {
               {!loading &&
                 !error &&
                 products.map((p) => {
-                  const isSelected = selectedIds.includes(p._id);
                   const price = p.sellingPrice ?? p.price ?? 0;
                   const categoryName = p.category?.name || p.category || 'General';
 
                   return (
                     <tr key={p._id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="py-3 px-3">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelectRow(p._id)}
-                          className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                        />
-                      </td>
-                      <td className="py-3 px-3">
-                        <img
-                          src={p.image}
-                          alt={p.name}
-                          className="w-10 h-10 object-cover rounded-lg border border-slate-200 bg-slate-50"
-                          onError={(e) => {
-                            e.target.src = 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=120&auto=format&fit=crop&q=80';
-                          }}
-                        />
-                      </td>
                       <td className="py-3 px-4 font-semibold text-slate-900">{p.name}</td>
                       <td className="py-3 px-4 font-mono text-slate-500 text-[11px]">{p.sku}</td>
+                      <td className="py-3 px-4 font-mono text-slate-500 text-[11px]">{p.barcode || '—'}</td>
                       <td className="py-3 px-4 text-slate-600">{categoryName}</td>
+                      <td className="py-3 px-4 text-slate-600">
+                        {p.suppliers?.length
+                          ? p.suppliers.map((supplier) => supplier.companyName).join(', ')
+                          : '—'}
+                      </td>
                       <td className="py-3 px-4 text-right font-bold text-slate-900">
                         {Number(price).toFixed(2)}
                       </td>
@@ -556,7 +614,7 @@ export default function Products() {
             <Input
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              placeholder="e.g. Amul Milk"
+              placeholder="Enter product name"
               error={!!formErrors.name}
               disabled={isSubmitting}
             />
@@ -596,13 +654,26 @@ export default function Products() {
               />
             </FormField>
 
-            <FormField label="Barcode (Optional)">
-              <Input
-                value={formData.barcode}
-                onChange={(e) => setFormData({ ...formData, barcode: e.target.value })}
-                placeholder="890123456010"
-                disabled={isSubmitting}
-              />
+            <FormField label="Barcode (Optional)" error={formErrors.barcode}>
+              <div className="flex gap-2">
+                <Input
+                  value={formData.barcode}
+                  onChange={(e) => setFormData({ ...formData, barcode: e.target.value })}
+                  placeholder="EAN / UPC / Code 128"
+                  error={!!formErrors.barcode}
+                  disabled={isSubmitting}
+                />
+                <button
+                  type="button"
+                  onClick={() => setIsBarcodeScannerOpen(true)}
+                  disabled={isSubmitting}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  aria-label="Scan product barcode with camera"
+                >
+                  <Barcode className="h-4 w-4" />
+                  <span>Scan</span>
+                </button>
+              </div>
             </FormField>
           </div>
 
@@ -611,6 +682,8 @@ export default function Products() {
               <FormField label="Initial Batch Stock (Units)" error={formErrors.initialStock}>
                 <Input
                   type="number"
+                  min="0"
+                  step="1"
                   value={formData.initialStock}
                   onChange={(e) => setFormData({ ...formData, initialStock: e.target.value })}
                   placeholder="50"
@@ -639,6 +712,112 @@ export default function Products() {
             </FormField>
           </div>
 
+          {!editingProduct && (
+            <div className="grid grid-cols-2 gap-3">
+              <FormField
+                label="Purchase / Cost Price (₹)"
+                required={Number(formData.initialStock) > 0}
+                error={formErrors.initialPurchasePrice}
+                helperText="Required when initial stock is greater than 0"
+              >
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={formData.initialPurchasePrice}
+                  onChange={(e) => setFormData({ ...formData, initialPurchasePrice: e.target.value })}
+                  placeholder="0.00"
+                  error={!!formErrors.initialPurchasePrice}
+                  disabled={isSubmitting}
+                />
+              </FormField>
+              <FormField
+                label="Expiry Date"
+                required={Number(formData.initialStock) > 0}
+                error={formErrors.initialExpiryDate}
+                helperText="Required when initial stock is greater than 0"
+              >
+                <Input
+                  type="date"
+                  min={getLocalDateInputValue()}
+                  value={formData.initialExpiryDate}
+                  onChange={(e) => setFormData({ ...formData, initialExpiryDate: e.target.value })}
+                  error={!!formErrors.initialExpiryDate}
+                  disabled={isSubmitting}
+                />
+              </FormField>
+            </div>
+          )}
+
+          {editingProduct && (
+            <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 space-y-3">
+              <div>
+                <h3 className="text-xs font-bold text-slate-800">Refill Product Stock</h3>
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  Received stock is added to a batch and recorded in inventory history.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Initial Batch Stock (Units)" error={formErrors.refillStock}>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={formData.refillStock}
+                    onChange={(e) => setFormData({ ...formData, refillStock: e.target.value })}
+                    placeholder="Enter units to add"
+                    error={!!formErrors.refillStock}
+                    disabled={isSubmitting}
+                  />
+                </FormField>
+                <FormField
+                  label="Batch Number"
+                  error={formErrors.refillBatchNumber}
+                  helperText="Required when adding stock"
+                >
+                  <Input
+                    value={formData.refillBatchNumber}
+                    onChange={(e) => setFormData({ ...formData, refillBatchNumber: e.target.value.toUpperCase() })}
+                    placeholder="e.g. B105"
+                    error={!!formErrors.refillBatchNumber}
+                    disabled={isSubmitting}
+                  />
+                </FormField>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField
+                  label="Purchase / Cost Price (₹)"
+                  error={formErrors.refillPurchasePrice}
+                  helperText="Required when adding stock"
+                >
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={formData.refillPurchasePrice}
+                    onChange={(e) => setFormData({ ...formData, refillPurchasePrice: e.target.value })}
+                    placeholder="0.00"
+                    error={!!formErrors.refillPurchasePrice}
+                    disabled={isSubmitting}
+                  />
+                </FormField>
+                <FormField
+                  label="Expiry Date"
+                  error={formErrors.refillExpiryDate}
+                  helperText="Required when adding stock"
+                >
+                  <Input
+                    type="date"
+                    value={formData.refillExpiryDate}
+                    onChange={(e) => setFormData({ ...formData, refillExpiryDate: e.target.value })}
+                    error={!!formErrors.refillExpiryDate}
+                    disabled={isSubmitting}
+                  />
+                </FormField>
+              </div>
+            </div>
+          )}
+
           <FormField label="Description">
             <Input
               value={formData.description}
@@ -649,6 +828,15 @@ export default function Products() {
           </FormField>
         </form>
       </Modal>
+      <BarcodeScanner
+        isOpen={isBarcodeScannerOpen}
+        onClose={() => setIsBarcodeScannerOpen(false)}
+        onScan={(code) => {
+          setFormData((current) => ({ ...current, barcode: code }));
+          setFormErrors((current) => ({ ...current, barcode: undefined }));
+          setIsBarcodeScannerOpen(false);
+        }}
+      />
     </div>
   );
 }

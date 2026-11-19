@@ -41,8 +41,9 @@ export default function Customers() {
       setLoading(true);
       const res = await customerService.getAll({ limit: 100 });
       setCustomers(res?.data || []);
-    } catch (err) {
-      addToast('Failed to load customers from database', 'error');
+    } catch (error) {
+      setCustomers([]);
+      addToast(error.message || 'Failed to load customers from the API.', 'error');
     } finally {
       setLoading(false);
     }
@@ -94,14 +95,25 @@ export default function Customers() {
   };
 
   const handleViewHistory = async (c) => {
-    setHistoryCustomer(c);
     setIsHistoryModalOpen(true);
+    setHistoryCustomer(null);
+    setCustomerInvoices([]);
+    setLoadingHistory(true);
     try {
-      setLoadingHistory(true);
       const res = await customerService.getInvoices(c._id);
+      if (!res?.data?.customer) {
+        setCustomers((current) => current.filter((customer) => customer._id !== c._id));
+        throw new Error('Customer record was not found in the API.');
+      }
+      setHistoryCustomer(res.data.customer);
       setCustomerInvoices(res?.data?.invoices || []);
     } catch (err) {
-      addToast('Failed to load customer invoice history', 'error');
+      setHistoryCustomer(null);
+      setCustomerInvoices([]);
+      if (err?.statusCode === 404) {
+        setCustomers((current) => current.filter((customer) => customer._id !== c._id));
+      }
+      addToast(err?.message || 'Failed to load customer invoice history from the API.', 'error');
     } finally {
       setLoadingHistory(false);
     }
@@ -371,7 +383,16 @@ export default function Customers() {
           </Button>
         }
       >
-        {historyCustomer && (
+        {loadingHistory ? (
+          <div className="py-8 text-center text-slate-400 text-xs">
+            <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-1 text-blue-500" />
+            Loading customer history from the API...
+          </div>
+        ) : !historyCustomer ? (
+          <div role="alert" className="py-6 text-center text-slate-500 text-xs">
+            Customer history could not be loaded from the API.
+          </div>
+        ) : (
           <div className="space-y-4">
             {/* Quick Profile Summary Card */}
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl grid grid-cols-3 gap-2 text-center text-xs">
@@ -402,12 +423,7 @@ export default function Customers() {
                 <Receipt className="w-3.5 h-3.5 text-slate-400" />
               </div>
 
-              {loadingHistory ? (
-                <div className="py-8 text-center text-slate-400 text-xs">
-                  <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-1 text-blue-500" />
-                  Loading invoices...
-                </div>
-              ) : customerInvoices.length === 0 ? (
+              {customerInvoices.length === 0 ? (
                 <div className="py-6 text-center text-slate-400 text-xs bg-slate-50 rounded-lg border border-slate-200">
                   No purchase invoices found for this customer yet.
                 </div>

@@ -8,4 +8,5 @@ export { Sale } from './Sale.js';
 export { Supplier } from './Supplier.js';
 export { Purchase } from './Purchase.js';
 export { SaleReturn } from './SaleReturn.js';
+export { StoreSettings } from './StoreSettings.js';
 

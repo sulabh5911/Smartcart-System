@@ -27,7 +27,10 @@ class InventoryController {
 
   // POST /api/inventory/receive
   receiveStock = asyncHandler(async (req, res) => {
-    const result = await inventoryService.receiveStock(req.body);
+    const result = await inventoryService.receiveStock({
+      ...req.body,
+      performedBy: req.user.name
+    });
     return ApiResponse.created(
       res,
       result,
@@ -37,7 +40,10 @@ class InventoryController {
 
   // POST /api/inventory/adjust
   adjustStock = asyncHandler(async (req, res) => {
-    const result = await inventoryService.adjustStock(req.body);
+    const result = await inventoryService.adjustStock({
+      ...req.body,
+      performedBy: req.user.name
+    });
     return ApiResponse.success(
       res,
       result,

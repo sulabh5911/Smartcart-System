@@ -361,7 +361,7 @@ export default function Users() {
                     required
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    placeholder="e.g. ramesh.cashier@smartmartpro.com"
+                    placeholder="Enter staff email"
                     className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-blue-500"
                   />
                 </div>

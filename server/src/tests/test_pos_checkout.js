@@ -91,7 +91,7 @@ async function runTests() {
 
     const sale1 = checkoutData1.data.sale;
     console.log(`✅ Sale created: Invoice #${sale1.invoiceNumber}`);
-    console.log(`   Items: ${sale1.itemsCount}, Subtotal: ₹${sale1.subtotal}, Discount: ₹${sale1.discountAmount}, Tax (5%): ₹${sale1.taxAmount}, Total: ₹${sale1.totalAmount}`);
+    console.log(`   Items: ${sale1.itemsCount}, Subtotal: ₹${sale1.subtotal}, Discount: ₹${sale1.discountAmount}, Tax: ₹${sale1.taxAmount}, Total: ₹${sale1.totalAmount}`);
     console.log(`   Payment Method: ${sale1.paymentMethod} (Audit Ledger Record Only)`);
     console.log('   FEFO Batches Deducted:', JSON.stringify(sale1.items[0].batchesDeducted));
 

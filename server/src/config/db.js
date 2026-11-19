@@ -33,7 +33,7 @@ export const connectDB = async () => {
     console.error(`Reason: ${error.message}`);
     console.error(`\n💡 Troubleshooting Tips:`);
     console.error(`1. Check if MongoDB service is running in Windows: Get-Service -Name MongoDB`);
-    console.error(`2. Check your connection string in server/.env: ${config.mongodbUri}`);
+    console.error('2. Check that MONGODB_URI in server/.env starts with mongodb:// or mongodb+srv:// and contains no extra key text.');
     console.error(`3. Default port is 27017.\n`);
     
     // In production we usually exit the process if DB connection fails

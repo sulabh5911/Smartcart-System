@@ -12,6 +12,7 @@ import returnRoutes from './return.routes.js';
 import reportRoutes from './report.routes.js';
 import authRoutes from './auth.routes.js';
 import userRoutes from './user.routes.js';
+import storeSettingsRoutes from './storeSettings.routes.js';
 
 const router = Router();
 
@@ -29,6 +30,7 @@ router.use('/suppliers', supplierRoutes);
 router.use('/purchases', purchaseRoutes);
 router.use('/returns', returnRoutes);
 router.use('/reports', reportRoutes);
+router.use('/settings', storeSettingsRoutes);
 
 
 export default router;

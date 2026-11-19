@@ -34,27 +34,6 @@ export class CustomerRepository {
       { new: true }
     );
   }
-
-  async ensureDefaultCustomers() {
-    const count = await Customer.countDocuments();
-    if (count === 0) {
-      await Customer.create([
-        { name: 'Walk-in Customer', phone: '---', email: '---', loyaltyPoints: 0, tier: 'General', totalSpent: 0 },
-        { name: 'Rahul Sharma', phone: '+91 98765 43210', email: 'rahul.s@example.com', loyaltyPoints: 340, tier: 'Gold', totalSpent: 12450 },
-        { name: 'Priya Singh', phone: '+91 98111 22334', email: 'priya.s@example.com', loyaltyPoints: 780, tier: 'Platinum', totalSpent: 28900 },
-        { name: 'Amit Verma', phone: '+91 97222 33445', email: 'amit.v@example.com', loyaltyPoints: 120, tier: 'Silver', totalSpent: 4500 }
-      ]);
-    } else {
-      const hasWalkIn = await Customer.findOne({ name: 'Walk-in Customer' });
-      if (!hasWalkIn) {
-        await Customer.create({ name: 'Walk-in Customer', phone: '---', email: '---', loyaltyPoints: 0, tier: 'General', totalSpent: 0 });
-      }
-      const hasRahul = await Customer.findOne({ name: 'Rahul Sharma' });
-      if (!hasRahul) {
-        await Customer.create({ name: 'Rahul Sharma', phone: '+91 98765 43210', email: 'rahul.s@example.com', loyaltyPoints: 340, tier: 'Gold', totalSpent: 12450 });
-      }
-    }
-  }
 }
 
 export const customerRepository = new CustomerRepository();

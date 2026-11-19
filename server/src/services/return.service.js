@@ -7,6 +7,7 @@ import { StockMovement } from '../models/StockMovement.js';
 import { returnRepository } from '../repositories/return.repository.js';
 import { inventoryService } from './inventory.service.js';
 import { ApiError } from '../utils/ApiError.js';
+import { allocateRefundableAmounts, calculateIncrementalRefundCents } from '../utils/refundCalculator.js';
 
 export class ReturnService {
   /**
@@ -70,6 +71,28 @@ export class ReturnService {
     const processedReturnItems = [];
     let totalRefundAmount = 0;
     let totalReturnedQty = 0;
+    const refundableAmountsCents = allocateRefundableAmounts(sale);
+    let remainingRefundCents = Math.max(
+      0,
+      refundableAmountsCents.reduce((sum, amount) => sum + amount, 0) -
+        Math.round((Number(sale.totalRefunded) || 0) * 100)
+    );
+    const refundableAmountByLine = new Map(
+      sale.items.map((item, index) => [item._id.toString(), refundableAmountsCents[index]])
+    );
+    const priorReturns = await returnRepository.findBySaleId(sale._id);
+    const refundedByProductCents = new Map();
+    for (const priorReturn of priorReturns) {
+      if (priorReturn.status !== 'Completed') continue;
+      for (const item of priorReturn.items || []) {
+        const productId = item.product.toString();
+        const refundedCents = Math.round((Number(item.lineRefund) || 0) * 100);
+        refundedByProductCents.set(
+          productId,
+          (refundedByProductCents.get(productId) || 0) + refundedCents
+        );
+      }
+    }
 
     // Track state modifications for compensating rollback on unexpected error
     const completedRestocks = []; // Track [{ batchId, restockedQty }]
@@ -105,9 +128,22 @@ export class ReturnService {
           );
         }
 
-        // Calculate line refund based on trusted unit price from original sale
-        const unitRate = originalLineItem.unitPrice;
-        const lineRefund = Math.round(unitRate * returnQty * 100) / 100;
+        // Refund the item's proportional share after invoice discounts, excluding tax.
+        const productId = originalLineItem.product.toString();
+        const previouslyRefundedCents = refundedByProductCents.get(productId) || 0;
+        const calculatedRefundCents = calculateIncrementalRefundCents({
+          refundableAmountCents:
+            refundableAmountByLine.get(originalLineItem._id.toString()) || 0,
+          originalQuantity: originalLineItem.quantity,
+          returnedBefore: alreadyReturned,
+          returnQuantity: returnQty,
+          previouslyRefundedCents
+        });
+        const lineRefundCents = Math.min(calculatedRefundCents, remainingRefundCents);
+        const lineRefund = lineRefundCents / 100;
+        remainingRefundCents -= lineRefundCents;
+        refundedByProductCents.set(productId, previouslyRefundedCents + lineRefundCents);
+        originalLineItem.refundedAmount = (previouslyRefundedCents + lineRefundCents) / 100;
         totalRefundAmount += lineRefund;
         totalReturnedQty += returnQty;
 
@@ -157,7 +193,7 @@ export class ReturnService {
           originalQuantity: originalLineItem.quantity,
           alreadyReturnedQuantity: alreadyReturned,
           returnQuantity: returnQty,
-          unitPrice: unitRate,
+          unitPrice: originalLineItem.unitPrice,
           lineRefund,
           batch: restockBatchId,
           batchNumber: restockBatchNumber,

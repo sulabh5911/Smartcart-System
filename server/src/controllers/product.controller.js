@@ -26,6 +26,12 @@ export class ProductController {
     return ApiResponse.success(res, product, 'Product details fetched successfully');
   });
 
+  // GET /api/products/barcode?code=...
+  getProductByBarcode = asyncHandler(async (req, res) => {
+    const product = await productService.getProductByBarcode(req.query.code);
+    return ApiResponse.success(res, product, 'Product barcode lookup succeeded');
+  });
+
   // POST /api/products
   createProduct = asyncHandler(async (req, res) => {
     const newProduct = await productService.createProduct(req.body);

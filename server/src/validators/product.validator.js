@@ -1,4 +1,5 @@
 import { ApiError } from '../utils/ApiError.js';
+import { normalizeBarcode } from '../utils/barcode.js';
 
 /**
  * Product Creation Request Validator Middleware
@@ -50,6 +51,13 @@ export const validateCreateProduct = (req, res, next) => {
     }
   }
 
+  try {
+    normalizeBarcode(barcode);
+  } catch (error) {
+    if (!(error instanceof ApiError)) return next(error);
+    errors.push(error.message);
+  }
+
   if (errors.length > 0) {
     return next(ApiError.badRequest('Product validation failed', errors));
   }
@@ -61,7 +69,7 @@ export const validateCreateProduct = (req, res, next) => {
  * Product Update Request Validator Middleware
  */
 export const validateUpdateProduct = (req, res, next) => {
-  const { name, sku, price, sellingPrice, minStockAlert } = req.body;
+  const { name, sku, price, sellingPrice, minStockAlert, barcode } = req.body;
   const errors = [];
 
   if (name !== undefined && (typeof name !== 'string' || name.trim().length < 2)) {
@@ -79,6 +87,15 @@ export const validateUpdateProduct = (req, res, next) => {
 
   if (minStockAlert !== undefined && (isNaN(minStockAlert) || Number(minStockAlert) < 0)) {
     errors.push('minStockAlert cannot be negative.');
+  }
+
+  if (barcode !== undefined) {
+    try {
+      normalizeBarcode(barcode);
+    } catch (error) {
+      if (!(error instanceof ApiError)) return next(error);
+      errors.push(error.message);
+    }
   }
 
   if (errors.length > 0) {

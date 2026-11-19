@@ -1,55 +1,35 @@
 import { connectDB, disconnectDB } from '../config/db.js';
 import { User } from '../models/User.js';
 
-export async function seedStaffUsers() {
-  console.log('👤 Seeding / Updating Staff Users for RBAC testing...');
+export async function createInitialAdmin() {
+  const name = process.env.INITIAL_ADMIN_NAME?.trim();
+  const email = process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase();
+  const password = process.env.INITIAL_ADMIN_PASSWORD;
 
-  const staffMembers = [
-    {
-      name: 'Supermarket Admin',
-      email: 'admin@smartmartpro.com',
-      password: 'AdminPassword123!',
-      role: 'admin',
-      phone: '+91 98765 00001',
-      isActive: true
-    },
-    {
-      name: 'Ramesh Verma (Store Manager)',
-      email: 'manager@smartmartpro.com',
-      password: 'ManagerPassword123!',
-      role: 'manager',
-      phone: '+91 98765 00002',
-      isActive: true
-    },
-    {
-      name: 'Pooja Sharma (Head Cashier)',
-      email: 'cashier@smartmartpro.com',
-      password: 'CashierPassword123!',
-      role: 'cashier',
-      phone: '+91 98765 00003',
-      isActive: true
-    }
-  ];
-
-  for (const staff of staffMembers) {
-    let existingUser = await User.findOne({ email: staff.email });
-    if (!existingUser) {
-      await User.create(staff);
-      console.log(`  ➕ Created ${staff.role.toUpperCase()}: ${staff.email}`);
-    } else {
-      existingUser.name = staff.name;
-      existingUser.role = staff.role;
-      existingUser.phone = staff.phone;
-      existingUser.isActive = true;
-      existingUser.password = staff.password; // pre-save will re-hash
-      existingUser.failedLoginAttempts = 0;
-      existingUser.lockUntil = null;
-      await existingUser.save();
-      console.log(`  🔄 Updated ${staff.role.toUpperCase()}: ${staff.email}`);
-    }
+  if (!name || !email || !password) {
+    throw new Error(
+      'Set INITIAL_ADMIN_NAME, INITIAL_ADMIN_EMAIL, and INITIAL_ADMIN_PASSWORD before bootstrapping.'
+    );
   }
 
-  console.log('✅ Staff users ready.');
+  if (password.length < 12) {
+    throw new Error('INITIAL_ADMIN_PASSWORD must be at least 12 characters long.');
+  }
+
+  if (await User.exists({})) {
+    throw new Error('Users already exist. Create staff through the authenticated Users API.');
+  }
+
+  const admin = await User.create({
+    name,
+    email,
+    password,
+    role: 'admin',
+    isActive: true
+  });
+
+  console.log(`Initial administrator created for ${email}.`);
+  return admin;
 }
 
 // Allow direct execution
@@ -57,11 +37,12 @@ if (process.argv[1]?.endsWith('seed_users.js')) {
   (async () => {
     try {
       await connectDB();
-      await seedStaffUsers();
+      await createInitialAdmin();
       await disconnectDB();
       process.exit(0);
     } catch (err) {
-      console.error('Failed to seed users:', err);
+      console.error('Failed to create initial administrator:', err.message);
+      await disconnectDB();
       process.exit(1);
     }
   })();

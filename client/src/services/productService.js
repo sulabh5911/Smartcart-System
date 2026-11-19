@@ -15,6 +15,11 @@ export const productService = {
     return await api.get(`/products/${id}`);
   },
 
+  // GET /api/products/barcode?code=...
+  getByBarcode: async (code) => {
+    return await api.get('/products/barcode', { params: { code } });
+  },
+
   // POST /api/products
   create: async (productData) => {
     return await api.post('/products', productData);

@@ -45,6 +45,18 @@ const supplierSchema = new mongoose.Schema(
       trim: true,
       default: 'General FMCG'
     },
+    categories: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Category'
+      }
+    ],
+    products: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Product'
+      }
+    ],
     paymentTerms: {
       type: String,
       enum: ['Immediate', 'Net 15', 'Net 30', 'Net 45', 'Cash on Delivery'],
@@ -76,5 +88,7 @@ const supplierSchema = new mongoose.Schema(
     timestamps: true
   }
 );
+
+supplierSchema.index({ products: 1 });
 
 export const Supplier = mongoose.model('Supplier', supplierSchema);

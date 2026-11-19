@@ -102,6 +102,12 @@ const purchaseSchema = new mongoose.Schema(
       default: 0,
       min: 0
     },
+    taxPercent: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100
+    },
     grandTotal: {
       type: Number,
       required: true,

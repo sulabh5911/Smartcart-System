@@ -13,6 +13,7 @@ export class BatchRepository {
   async findByProduct(productId) {
     return await Batch.find({ product: productId })
       .sort({ expiryDate: 1 })
+      .populate('supplier', 'companyName')
       .populate('product', 'name sku unit sellingPrice');
   }
 
@@ -31,6 +32,7 @@ export class BatchRepository {
 
     const batches = await Batch.find(filter)
       .sort({ expiryDate: 1 })
+      .populate('supplier', 'companyName')
       .populate({
         path: 'product',
         select: 'name sku unit sellingPrice category isArchived',
