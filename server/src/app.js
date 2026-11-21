@@ -1,3 +1,4 @@
+
 import express from 'express';
 import cors from 'cors';
 import { config } from './config/env.js';
@@ -8,11 +9,25 @@ import apiRouter from './routes/index.js';
 
 const app = express();
 
-// 1. Global Middlewares
+// Allowed frontend URLs
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://smartcart-system.vercel.app',
+  'https://smartcart-system-qnzld7p9e-sulabh5911s-projects.vercel.app'
+];
+
+// CORS configuration
 app.use(
   cors({
-    origin: config.corsOrigin,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked for origin: ${origin}`));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
   })
 );
@@ -24,7 +39,7 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Custom request logger
 app.use(requestLogger);
 
-// 2. Welcome Route
+// Welcome Route
 app.get('/', (req, res) => {
   res.status(200).json({
     project: 'Smart Mart Pro Supermarket REST API',
@@ -34,13 +49,13 @@ app.get('/', (req, res) => {
   });
 });
 
-// 3. API Sub-router mounting
+// API routes
 app.use('/api', apiRouter);
 
-// 4. 404 Route Not Found Handler
+// 404 Handler
 app.use(notFoundHandler);
 
-// 5. Centralized Error Handler (Must be last middleware)
+// Error Handler
 app.use(errorHandler);
 
 export default app;
