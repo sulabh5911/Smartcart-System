@@ -1,6 +1,12 @@
 # Smart Mart Pro
 
-loginin with staff 
+loginin with Manager
+Email-rahul@gmail.com
+password-12345678
+
+
+
+staff 
 Email- your-real-email@gmail.com
 Password-12345678
 
