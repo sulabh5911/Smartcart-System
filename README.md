@@ -1,5 +1,9 @@
 # Smart Mart Pro
 
+loginin with staff 
+Email- your-real-email@gmail.com
+Password-12345678
+
 ## Barcode scanning
 
 Product barcodes are optional text values. The API trims them and accepts 1–64 printable ASCII characters, covering common EAN-8, EAN-13, UPC-A, UPC-E, and Code 128 values. Codes are stored as strings so leading zeroes are preserved. Empty values are treated as no barcode; non-empty values are unique across products. Existing products are not assigned synthetic barcodes.
